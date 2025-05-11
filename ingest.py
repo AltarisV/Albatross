@@ -1,7 +1,7 @@
 import os
 import argparse
 from dotenv import load_dotenv
-import fitz  # PyMuPDF for granular PDF extraction
+import fitz
 from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.embeddings import OpenAIEmbeddings
