@@ -13,12 +13,12 @@ OPENAI_API_KEY='your_openai_api_key_here'
 
 ### 1. Ingest PDF into ChromaDB
 
-    python ingest.py IT-Grundschutz-2023.pdf --persist_dir db
+    python ingest.py your_pdf_name.pdf --persist_dir db
 
-- **IT-Grundschutz-2023.pdf**: Path to your PDF file  
+- **your_pdf_name.pdf**: Path to your PDF file  
 - **--persist_dir db**: Directory where ChromaDB files are stored (default: `db/`)
 
-After ingest completes, you should see in your terminal:
+After ingest completes, you should see this in your terminal:
 
     ✅ Ingested X document chunks into 'db' using OpenAI Embeddings
 
