@@ -1,4 +1,4 @@
-A Proof of Concept for extracting data from a PDF with `ingest.py`, put it into a ChromaDB and then query and navigate the data in `app.py`.
+A Proof of Concept for extracting data from a PDF with `ingest.py`, put it into a ChromaDB and then query and navigate the data through a streamlit app in `app.py`.
 
 
 ## Usage
