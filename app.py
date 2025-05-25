@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 import streamlit as st
 import pandas as pd
-from langchain.embeddings import OpenAIEmbeddings
+from langchain_community.embeddings import OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
 from st_aggrid import AgGrid, GridOptionsBuilder
 
@@ -10,57 +10,64 @@ load_dotenv()
 
 
 def load_db_entries(embeddings):
+    # open the existing Chroma DB
     vectordb = Chroma(persist_directory="db", embedding_function=embeddings)
-    collection = vectordb._collection
-    total = collection.count()
-    data = collection.get(limit=total)
+    col = vectordb._collection
+    total = col.count()
+    data = col.get(limit=total)
+
     rows = []
-    for doc_id, doc_text, meta in zip(data["ids"], data["documents"], data["metadatas"]):
+    for doc_id, text, meta in zip(data["ids"], data["documents"], data["metadatas"]):
         rows.append({
             "ID": doc_id,
-            "Seite": meta.get("page_number"),
-            "Typ": meta.get("block_type") or "Unknown",
-            "Snippet": doc_text.replace("\n", " ")
+            "Req-ID": meta.get("requirement_id"),
+            "XML-ID": meta.get("xml_id"),
+            # show the full snippet without character limit
+            "Snippet": text.replace("\n", " ")
         })
     df = pd.DataFrame(rows)
-    return df, data["documents"]
+    return df, data["documents"], data["metadatas"]
 
 
 def main():
-    st.set_page_config(page_title="PDF Explorer POC", layout="wide")
-    st.title("ChromaDB Kompendium Browser")
+    st.set_page_config(page_title="Grundschutz Kompendium Explorer", layout="wide")
+    st.title("IT-Grundschutz Kompendium-Browser")
 
-    page = st.sidebar.radio("Navigation", ["Query PDF", "Datenbank Explorer"])
+    page = st.sidebar.radio("Navigation", ["Datenbank Explorer", "Frage & Antworten"])
 
     api_key = os.getenv("OPENAI_API_KEY")
     embeds = OpenAIEmbeddings(openai_api_key=api_key)
 
     if page == "Datenbank Explorer":
-        st.header("🔎 Datenbank Explorer")
-        df, docs = load_db_entries(embeds)
+        st.header("Datenbank Explorer")
+        df, docs, _ = load_db_entries(embeds)
 
+        # show how many entries we loaded
+        st.markdown(f"**In Datenbank:** {len(df)} Einträge")
+
+        # show full table
+        with st.expander("Alle Einträge anzeigen", expanded=True):
+            st.dataframe(df)
+
+        # filter by requirement ID only
         with st.expander("Filter & Sortierung", expanded=False):
-            cols = st.columns(3)
-            with cols[0]:
-                pages = sorted(df["Seite"].unique())
-                selected_pages = st.multiselect("Filter Seiten", options=pages, default=pages)
-            with cols[1]:
-                types = sorted(df["Typ"].unique())
-                selected_types = st.multiselect("Filter Typen", options=types, default=types)
-            with cols[2]:
-                sort_col = st.selectbox("Sortiere nach", options=["Seite", "Typ", "ID"], index=0)
-                ascending = st.checkbox("Aufsteigend", value=True)
-        df_filtered = df[df["Seite"].isin(selected_pages) & df["Typ"].isin(selected_types)]
+            reqs = sorted(x for x in df["Req-ID"].unique() if x)
+            selected_reqs = st.multiselect("Filter Req-ID", options=reqs, default=reqs)
+            sort_col = st.selectbox("Sortiere nach", options=["Req-ID", "ID"], index=0)
+            ascending = st.checkbox("Aufsteigend", value=True)
+
+        # apply filtering and sorting
+        df_filtered = df[df["Req-ID"].isin(selected_reqs)]
         df_sorted = df_filtered.sort_values(by=sort_col, ascending=ascending)
 
+        # AG-Grid view
+        st.subheader("Gefiltert")
         gb = GridOptionsBuilder.from_dataframe(df_sorted)
         gb.configure_default_column(editable=False, sortable=True, filter=True)
         gb.configure_column("Snippet", wrapText=True, autoHeight=True)
         gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=10)
         gridOptions = gb.build()
-
-        st.subheader("📊 Datenbank-Tabelle")
-        grid_response = AgGrid(
+        grid_resp = AgGrid(
             df_sorted,
             gridOptions=gridOptions,
             enable_enterprise_modules=False,
@@ -68,28 +75,24 @@ def main():
             fit_columns_on_grid_load=True
         )
 
-        rows = grid_response.get('selected_rows', [])
-        if rows:
-            sel = rows[0]
-            st.subheader("Detailansicht")
-            st.markdown(f"**ID:** {sel['ID']}")
-            st.markdown(f"- Seite: {sel['Seite']}  |  Typ: {sel['Typ']}")
-            idx = df_sorted.index[df_sorted['ID'] == sel['ID']][0]
+        sel = grid_resp.get("selected_rows")
+        if sel:
+            row = sel[0]
+            st.subheader(f"Detail: {row['Req-ID']}  (XML-ID: {row['XML-ID']})")
+            idx = df_sorted.index[df_sorted["ID"] == row["ID"]][0]
             st.write(docs[idx])
 
     else:
-        st.header("Finde Informationen aus der PDF")
-        query = st.text_input("Deine Frage:")
+        st.header("Vector-DB-Query")
+        query = st.text_input("Stelle deine Frage:")
         if query:
             vectordb = Chroma(persist_directory="db", embedding_function=embeds)
             results = vectordb.similarity_search(query, k=5)
-            st.subheader("🔍 Gefundene Dokument-Chunks")
-            for i, doc in enumerate(results):
-                page_num = doc.metadata.get("page_number", "–")
-                block = doc.metadata.get("block_type", "–")
-                st.markdown(f"**Chunk {i + 1}** • Seite {page_num} • Typ {block}")
+            for i, doc in enumerate(results, 1):
+                rid = doc.metadata.get("requirement_id", "–")
+                st.markdown(f"**Ergebnis {i}** • Req-ID: {rid}")
                 st.write(doc.page_content)
-                st.write("---")
+                st.markdown("---")
 
 
 if __name__ == "__main__":

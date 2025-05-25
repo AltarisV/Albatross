@@ -6,7 +6,7 @@ import xml.etree.ElementTree as ET
 from dotenv import load_dotenv
 from typing import List
 from langchain.schema import Document
-from langchain.embeddings import OpenAIEmbeddings
+from langchain_community.embeddings import OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
 
 load_dotenv()
@@ -19,10 +19,6 @@ NS = {'db': 'http://docbook.org/ns/docbook'}
 
 
 def load_requirements_from_xml(xml_path: str) -> List[Document]:
-    """
-    Parse the IT-Grundschutz Kompendium XML and extract one Document per requirement.
-    Each Document contains the title and associated paragraphs.
-    """
     tree = ET.parse(xml_path)
     root = tree.getroot()
     docs: List[Document] = []

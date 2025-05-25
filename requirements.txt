@@ -1,0 +1,8 @@
+python-dotenv
+streamlit
+pandas
+streamlit-aggrid
+langchain
+langchain-community
+chromadb
+openai

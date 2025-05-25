@@ -59,3 +59,13 @@ After running, you’ll see something like:
 ```bash
 streamlit run app.py
 ```
+
+## Alternatively, run with Docker-Compose
+
+If you’ve set up the included `Dockerfile` and `docker-compose.yml`, you can build and start everything in one step:
+
+```bash
+docker-compose up --build
+```
+
+This will automatically run the ingestion step (if needed) and then launch the Streamlit app at [http://localhost:8501](http://localhost:8501).
