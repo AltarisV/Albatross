@@ -183,18 +183,18 @@ def modules_to_documents(chapters: List[Dict[str, Any]]) -> List[Document]:
                     }
                     docs.append(Document(page_content=chunk, metadata=meta))
 
-            # --- Requirement chunks ---
+            # --- Requirement chunks (nur Fließtext chunking; Titel bleibt Metadatum) ---
             for req in mod.get("requirements", []):
-                full_req_text = f"{req['title']}\n\n{req['text']}"
-                for i, chunk in enumerate(splitter.split_text(full_req_text)):
+                # Chunk only the plain requirement text
+                for i, chunk in enumerate(splitter.split_text(req["text"])):
                     meta = {
                         **base_meta,
-                        "type":               "requirement",
-                        "requirement_id":     req["requirement_id"],
-                        "requirement_title":  req["title"],           # vollständiger Titel
-                        "level":              req["level"],
-                        "roles":              ", ".join(req["roles"]),
-                        "chunk_index":        i,
+                        "type":              "requirement",
+                        "requirement_id":    req["requirement_id"],
+                        "requirement_title": req["title"],  # vollständiger Titel als Metadatum
+                        "level":             req["level"],
+                        "roles":             ", ".join(req.get("roles", [])),
+                        "chunk_index":       i,
                     }
                     docs.append(Document(page_content=chunk, metadata=meta))
 
