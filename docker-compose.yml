@@ -1,11 +1,12 @@
 services:
   app:
     build: .
+    volumes:
+      - db_data:/app/db   # <-- Named Volume, nicht ./db:/app/db
     ports:
       - "8501:8501"
-    volumes:
-      - ./resources:/app/resources
-      - ./db:/app/db
-      - ./.env:/app/.env
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+
+volumes:
+  db_data:
