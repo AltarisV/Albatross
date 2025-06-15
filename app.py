@@ -2,6 +2,8 @@ import os
 from dotenv import load_dotenv
 import streamlit as st
 import pandas as pd
+from io import BytesIO
+from docx import Document
 
 from langchain_community.embeddings import OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
@@ -78,10 +80,44 @@ def build_hierarchy(docs, metas):
     return hier
 
 
+def build_docx(requirements):
+    """
+    requirements: Liste von dicts, jedes mit:
+      - 'meta': Metadaten dict (mind. 'requirement_id', 'title', 'level', ...)
+      - 'chunks': List[(idx, text)]
+    """
+    doc = Document()
+    doc.add_heading("Ausgewählte Anforderungen", level=1)
+
+    for req in requirements:
+        meta = req['meta']
+        title = meta.get('title', meta.get('requirement_id'))
+        doc.add_heading(title, level=2)
+        for _, chunk in req['chunks']:
+            # jeder Chunk als eigener Absatz
+            doc.add_paragraph(chunk)
+        # Fußnote mit Metadaten
+        doc.add_paragraph(
+            f"ID: {meta.get('requirement_id')}  |  Level: {meta.get('level')}  |  Rollen: {meta.get('roles')}",
+            style="IntenseQuote"
+        )
+        doc.add_page_break()
+
+    buf = BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf
+
+
 # --- Streamlit App ---
 def main():
     st.set_page_config(page_title='Kompendium Explorer', layout='wide')
     st.title('IT-Grundschutz Kompendium – Explorer')
+
+    st.sidebar.header("Ausgewählte Anforderungen")
+    # use session state to store selected req keys
+    if 'cart' not in st.session_state:
+        st.session_state.cart = []  # list of (chap, mod, rid)
 
     page = st.sidebar.radio('Navigation', [
         'Datenbank Explorer',
@@ -184,7 +220,7 @@ def main():
                 results = vdb.max_marginal_relevance_search(
                     query,
                     k=k,
-                    fetch_k=k*5,
+                    fetch_k=k * 5,
                     lambda_mult=0.7,
                     filter={"type": "requirement"},
                 )
@@ -192,7 +228,7 @@ def main():
                 results = vdb.max_marginal_relevance_search(
                     query,
                     k=k,
-                    fetch_k=k*5,
+                    fetch_k=k * 5,
                     lambda_mult=0.7,
                 )
 
@@ -213,106 +249,56 @@ def main():
                 st.markdown('---')
 
     elif page == 'Drilldown der Bausteine':
-        st.header('Drilldown der Bausteine')
-
-        # 1) Quicksearch-Feld
-        query = st.text_input("Schnellsuche (z.B. 'Server')", value="").strip().lower()
-
-        # 2) Rohdaten laden und Hierarchie bauen
-        docs, metas = load_db('db', embeds)
-        hier = build_hierarchy(docs, metas)
-
-        # 3) Kapitel durchlaufen
-        for chap_id, modules in sorted(hier.items()):
-            # Kapitel-Titel aus Metadaten (oder fallback auf chap_id)
-            chap_title = next(
-                (m.get('chapter_title') for m in metas
-                 if m.get('chapter_id') == chap_id and m.get('chapter_title')),
-                chap_id
-            )
-
-            # Wir wollen das Kapitel nur anzeigen, wenn
-            # entweder kein Query gesetzt ist ODER mindestens ein Kind passt
-            # -> compute a flag:
-            def module_matches(mod_info):
-                # sucht in Modul-Titel und Beschreibung
-                _, desc, mod_meta = mod_info['module_docs'][0]
-                module_title = mod_meta.get('module_title', '')
-                if query and query in module_title.lower(): return True
-                if query and query in desc.lower(): return True
-                # oder in einer der Anforderungen
-                for rid, req in mod_info['requirements'].items():
-                    title = req['meta'].get('requirement_title', '').lower()
-                    if query in title: return True
-                    # optional: suche auch im Chunk-Text
-                    for _, chunk in req['chunks']:
-                        if query in chunk.lower(): return True
-                return False
-
-            # Kapitel-Flag: mindestens ein Modul matcht?
-            chap_has = (not query) or any(module_matches(info) for info in modules.values())
-            if not chap_has:
-                continue
-
-            # Kapitel-Checkbox (oder Expander – hier Checkbox wie gehabt)
-            if not st.checkbox(f"{chap_id} – {chap_title}", key=f"chap_{chap_id}", value=bool(query)):
-                continue
-
-            # 4) Module durchlaufen
-            for mod_id, info in sorted(modules.items()):
-                # Modul-Metadaten
-                _, desc, mod_meta = info['module_docs'][0]
-                module_title = mod_meta.get('module_title', mod_id)
-                full_mod_label = f"{mod_id} – {module_title}"
-
-                # filter Modul?
-                mod_has = (not query) or module_matches(info)
-                if not mod_has:
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            query = st.text_input("Schnellsuche (z.B. 'Server')").strip().lower()
+            docs, metas = load_db('db', embeds)
+            hier = build_hierarchy(docs, metas)
+            for chap_id, modules in sorted(hier.items()):
+                chap_title = next(
+                    (m.get('chapter_title') for m in metas
+                     if m.get('chapter_id') == chap_id and m.get('chapter_title')),
+                    chap_id
+                )
+                chap_label = f"{chap_id} – {chap_title}"
+                show_ch = st.checkbox(chap_label, key=f'chap_{chap_id}', value=bool(query))
+                if not show_ch:
                     continue
-
-                # Expander für das Modul, automatisch expanded wenn Query passt
-                with st.expander(full_mod_label, expanded=bool(query)):
-                    # Beschreibung
-                    st.markdown("**Beschreibung:**")
-                    st.write(desc)
-
-                    # Anforderungen
-                    st.markdown("**Anforderungen:**")
-                    for rid, req in sorted(info['requirements'].items()):
-                        req_meta = req['meta']
-                        req_title = req_meta.get('requirement_title', rid)
-
-                        # Prüfen, ob diese Anforderung zum Filter passt
-                        req_match = False
-                        if not query:
-                            req_match = False
-                        else:
-                            low = req_title.lower()
-                            if query in low:
-                                req_match = True
+                for mod_id, info in sorted(modules.items()):
+                    _, desc, mod_meta = info['module_docs'][0]
+                    module_title = mod_meta.get('module_title', mod_id)
+                    mod_label = f"{mod_id} – {module_title}"
+                    with st.expander(mod_label, expanded=bool(query)):
+                        st.markdown("**Beschreibung:**")
+                        st.write(desc)
+                        st.markdown("**Anforderungen:**")
+                        for rid, req in sorted(info['requirements'].items()):
+                            req_meta = req['meta']
+                            req_title = req_meta.get('requirement_title', rid)
+                            key = f"cart_{chap_id}_{mod_id}_{rid}"
+                            checked = st.checkbox(req_title, key=key)
+                            if checked:
+                                entry = {'meta': req_meta, 'chunks': req['chunks']}
+                                if entry not in st.session_state.cart:
+                                    st.session_state.cart.append(entry)
                             else:
-                                for _, chunk in req['chunks']:
-                                    if query in chunk.lower():
-                                        req_match = True
-                                        break
-
-                        if query:
-                            # bei Query nur die gematchten Anforderungen ausgeben,
-                            # und direkt den Inhalt anzeigen
-                            if not req_match:
-                                continue
-                            st.markdown(f"- **{req_title}**")
-                            for _, chunk in req['chunks']:
-                                st.write(chunk)
-                            st.caption(req_meta)
-                        else:
-                            # kein Query: wie gehabt mit Checkbox
-                            if st.checkbox(req_title, key=f"req_{chap_id}_{mod_id}_{rid}"):
-                                for _, chunk in req['chunks']:
-                                    st.write(chunk)
-                                st.caption(req_meta)
-
-        st.markdown("---")
+                                st.session_state.cart = [e for e in st.session_state.cart
+                                                         if e['meta'].get('requirement_id') != rid]
+        # Warenkorb anzeigen
+        with col2:
+            st.markdown("---")
+            st.write(f"**{len(st.session_state.cart)} Anforderungen**")
+            for item in st.session_state.cart:
+                title = item['meta'].get('requirement_title', item['meta'].get('requirement_id'))
+                st.write(f"- {title}")
+            if st.button("Export DOCX"):
+                buf = build_docx(st.session_state.cart)
+                st.download_button(
+                    label="Download DOCX",
+                    data=buf,
+                    file_name="Anforderungen.docx"
+                )
+        return
 
 
 if __name__ == '__main__':
