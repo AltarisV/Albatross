@@ -8,22 +8,26 @@ from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 
 # Optional (nur benötigt für --mode vectordb)
+from langchain.schema import Document  # type: ignore
+
+# Embeddings: bevorzugt aus langchain_openai
 try:
-    from langchain.schema import Document  # type: ignore
-    from langchain_community.embeddings import OpenAIEmbeddings  # type: ignore
-    from langchain_community.vectorstores import Chroma  # type: ignore
-except ImportError:  # pragma: no cover
-    Document = Any  # type: ignore
+    from langchain_openai import OpenAIEmbeddings
+except ImportError:
+    from langchain_community.embeddings import OpenAIEmbeddings  # fallback alte Version
+
+from langchain_community.vectorstores import Chroma  # type: ignore
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 load_dotenv()
 
 ###############################################################################
-# Regex & XML‑Namespace
+# Regex & XML-Namespace
 ###############################################################################
-REQ_RE = re.compile(r"^[A-Z]+(?:\.\d+)+\.A\d+\b")  # APP.1.2.A3 …
-MODULE_RE = re.compile(r"^([A-Z]+(?:\.\d+)+)\s+")  # SYS.2.4 …
-CHAPTER_RE = re.compile(r"^[A-Z]{2,5}\b")  # SYS, APP …
-NS = {"db": "http://docbook.org/ns/docbook"}  # DocBook 5 NS
+REQ_RE = re.compile(r"^[A-Z]+(?:\.\d+)+\.A\d+\b")  # Anforderungen
+MODULE_RE = re.compile(r"^([A-Z]+(?:\.\d+)+)\s+")  # Bausteine
+CHAPTER_RE = re.compile(r"^[A-Z]{2,5}\b")  # Kapitel-Kürzel
+NS = {"db": "http://docbook.org/ns/docbook"}  # DocBook-NS
 
 
 ###############################################################################
@@ -31,106 +35,89 @@ NS = {"db": "http://docbook.org/ns/docbook"}  # DocBook 5 NS
 ###############################################################################
 
 def _text_from_paras(el: ET.Element) -> str:
-    """Alle <para>-Nachfahren zu einem Fließtext zusammenfassen."""
     paras = ["".join(p.itertext()).strip() for p in el.findall(".//db:para", NS)]
     return "\n\n".join(filter(None, paras))
 
 
-def _find_subsection(parent: ET.Element, title_query: str) -> Optional[ET.Element]:
-    """Direkte Kind‑<section> mit passendem <title> finden."""
+def _find_subsection(parent: ET.Element, title: str) -> Optional[ET.Element]:
     for sec in parent.findall("db:section", NS):
-        title_el = sec.find("db:title", NS)
-        if title_el is not None and title_el.text and title_el.text.strip() == title_query:
+        t = sec.find("db:title", NS)
+        if t is not None and t.text and t.text.strip() == title:
             return sec
     return None
 
 
 ###############################################################################
-# Kern‑Parsing
+# Struktur extrahieren
 ###############################################################################
 
 def extract_structure(xml_path: str) -> List[Dict[str, Any]]:
-    """XML des IT‑Grundschutz‑Kompendiums hierarchisch auslesen."""
     tree = ET.parse(xml_path)
     root = tree.getroot()
-
     chapters: List[Dict[str, Any]] = []
 
     for chap in root.findall("db:chapter", NS):
-        chap_title_el = chap.find("db:title", NS)
-        if chap_title_el is None or not chap_title_el.text:
+        ct = chap.find("db:title", NS)
+        if ct is None or not ct.text:
             continue
-        chap_title = chap_title_el.text.strip()
-        if not CHAPTER_RE.match(chap_title):
-            continue  # Meta‑Kapitel überspringen (Vorwort, Glossar …)
+        title = ct.text.strip()
+        if not CHAPTER_RE.match(title):
+            continue
+        chap_id = title.split()[0]
+        chapter = {"chapter_id": chap_id, "chapter_title": title, "modules": []}
 
-        chap_id = chap_title.split()[0]  # z. B. "SYS"
-        chapter_dict: Dict[str, Any] = {
-            "chapter_id": chap_id,
-            "chapter_title": chap_title,
-            "modules": []
-        }
-
-        # Innerste Sections = Bausteine
         for mod in chap.findall("db:section", NS):
-            mod_title_el = mod.find("db:title", NS)
-            if mod_title_el is None or not mod_title_el.text:
+            mt = mod.find("db:title", NS)
+            if mt is None or not mt.text:
                 continue
-            mod_title_raw = mod_title_el.text.strip()
-            m = MODULE_RE.match(mod_title_raw)
+            raw = mt.text.strip()
+            m = MODULE_RE.match(raw)
             if not m:
-                continue  # kein Baustein
+                continue
+            mod_id = m.group(1)
+            mod_title = raw[len(mod_id):].strip()
 
-            module_id = m.group(1)  # "SYS.2.4"
-            module_title = mod_title_raw[len(module_id):].strip()
-
-            # Narrative Teile
             description = _text_from_paras(_find_subsection(mod, "Beschreibung") or mod)
             goal = _text_from_paras(_find_subsection(mod, "Zielsetzung") or mod)
             scope = _text_from_paras(_find_subsection(mod, "Abgrenzung und Modellierung") or mod)
 
-            # Gefährdungen
-            threats: List[Dict[str, str]] = []
-            threats_sec = _find_subsection(mod, "Gefährdungslage")
-            if threats_sec is not None:
-                for t in threats_sec.findall("db:section", NS):
-                    tt = t.find("db:title", NS)
-                    if tt is None or not tt.text:
+            # Gefährdungen sammeln
+            threats = []
+            th_sec = _find_subsection(mod, "Gefährdungslage")
+            if th_sec:
+                for t in th_sec.findall("db:section", NS):
+                    t_title = t.find("db:title", NS)
+                    if t_title is None or not t_title.text:
                         continue
-                    threats.append({
-                        "title": tt.text.strip(),
-                        "text": _text_from_paras(t)
-                    })
+                    threats.append({"title": t_title.text.strip(), "text": _text_from_paras(t)})
 
-            # Anforderungen – jetzt rekursiv & namespace‑sicher
-            requirements: List[Dict[str, Any]] = []
+            # Anforderungen sammeln
+            requirements = []
             req_root = _find_subsection(mod, "Anforderungen")
-            if req_root is not None:
-                for req in req_root.findall(".//db:section", NS):
-                    title_el = req.find("db:title", NS)
-                    if title_el is None or not title_el.text:
+            if req_root:
+                for r in req_root.findall(".//db:section", NS):
+                    r_title = r.find("db:title", NS)
+                    if r_title is None or not r_title.text:
                         continue
-                    title_full = title_el.text.strip()
-                    if not REQ_RE.match(title_full):
-                        continue  # Überschriften wie "Basis‑Anforderungen" o. Ä.
-
-                    req_id = title_full.split()[0]
-                    level_match = re.search(r"\((B|S|H)\)", title_full)
-                    level = level_match.group(1) if level_match else "?"
-                    roles_match = re.search(r"\[(.+?)\]", title_full)
-                    roles = [r.strip() for r in roles_match.group(1).split(',')] if roles_match else []
-
+                    full = r_title.text.strip()
+                    if not REQ_RE.match(full):
+                        continue
+                    rid = full.split()[0]
+                    lvl_m = re.search(r"\((B|S|H)\)", full)
+                    level = lvl_m.group(1) if lvl_m else "?"
+                    roles_m = re.search(r"\[(.+?)\]", full)
+                    roles = [x.strip() for x in roles_m.group(1).split(",")] if roles_m else []
                     requirements.append({
-                        "requirement_id": req_id,
-                        "title": title_full,
+                        "requirement_id": rid,
+                        "title": full,
                         "level": level,
                         "roles": roles,
-                        "text": _text_from_paras(req)
+                        "text": _text_from_paras(r)
                     })
 
-            chapter_dict["modules"].append({
-                "module_id": module_id,
-                "module_title": module_title,
+            chapter["modules"].append({
+                "module_id": mod_id,
+                "module_title": mod_title,
                 "description": description,
                 "goal": goal,
                 "scope": scope,
@@ -138,69 +125,78 @@ def extract_structure(xml_path: str) -> List[Dict[str, Any]]:
                 "requirements": requirements
             })
 
-        if chapter_dict["modules"]:
-            chapters.append(chapter_dict)
-
+        if chapter["modules"]:
+            chapters.append(chapter)
     return chapters
 
 
 ###############################################################################
-# Vektor‑DB (optional)
+# Documents für Vektordb mit Chunking
 ###############################################################################
 
-def modules_to_documents(chapters: List[Dict[str, Any]]) -> List[Document]:  # type: ignore
+def modules_to_documents(chapters: List[Dict[str, Any]]) -> List[Document]:
     """
-    Wandelt die hierarchische Kapitel-Liste in flache LangChain-Documents um.
-
-    • pro Baustein  ->  1 Document  (type="module")
-    • pro Gefährdung -> 1 Document  (type="threat")
-    • pro Anforderung -> 1 Document  (type="requirement")
+    Flatten modules, threats and requirements into LangChain Documents,
+    chunking long texts and embedding rich metadata including full titles.
     """
     docs: List[Document] = []
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
 
     for chap in chapters:
+        # Base metadata for this chapter
+        base_chap_meta = {
+            "chapter_id":    chap["chapter_id"],
+            "chapter_title": chap["chapter_title"],
+        }
+
         for mod in chap["modules"]:
-            meta_base = {
-                "chapter_id": chap["chapter_id"],
-                "module_id": mod["module_id"],
+            # Extend base metadata with module info
+            base_meta = {
+                **base_chap_meta,
+                "module_id":    mod["module_id"],
+                "module_title": mod["module_title"],
             }
 
-            # ──────────────────────────── Modul-Narrativ ───────────────────────────
-            narrativa = "\n\n".join([
+            # --- Module narrative chunks ---
+            full_mod_text = "\n\n".join([
                 f"Beschreibung:\n{mod['description']}",
                 f"Zielsetzung:\n{mod['goal']}",
-                f"Abgrenzung:\n{mod['scope']}",
+                f"Abgrenzung:\n{mod['scope']}"
             ])
-            docs.append(
-                Document(
-                    page_content=f"{mod['module_id']} {mod['module_title']}\n\n{narrativa}",
-                    metadata={**meta_base, "type": "module"},
-                )
-            )
+            for i, chunk in enumerate(splitter.split_text(full_mod_text)):
+                meta = {
+                    **base_meta,
+                    "type":        "module",
+                    "chunk_index": i,
+                }
+                docs.append(Document(page_content=chunk, metadata=meta))
 
-            # ───────────────────────────── Gefährdungen ────────────────────────────
-            for thr in mod["threats"]:
-                docs.append(
-                    Document(
-                        page_content=f"{mod['module_id']} THREAT: {thr['title']}\n\n{thr['text']}",
-                        metadata={**meta_base,
-                                  "type": "threat",
-                                  "threat_title": thr["title"]},
-                    )
-                )
+            # --- Threat chunks ---
+            for thr in mod.get("threats", []):
+                thr_text = f"{thr['title']}\n\n{thr['text']}"
+                for i, chunk in enumerate(splitter.split_text(thr_text)):
+                    meta = {
+                        **base_meta,
+                        "type":         "threat",
+                        "threat_title": thr["title"],
+                        "chunk_index":  i,
+                    }
+                    docs.append(Document(page_content=chunk, metadata=meta))
 
-            # ───────────────────────────── Anforderungen ───────────────────────────
-            for req in mod["requirements"]:
-                docs.append(
-                    Document(
-                        page_content=f"{req['title']}\n\n{req['text']}",
-                        metadata={**meta_base,
-                                  "type": "requirement",
-                                  "requirement_id": req["requirement_id"],
-                                  "level": req.get("level"),
-                                  "roles": req.get("roles", [])},
-                    )
-                )
+            # --- Requirement chunks ---
+            for req in mod.get("requirements", []):
+                full_req_text = f"{req['title']}\n\n{req['text']}"
+                for i, chunk in enumerate(splitter.split_text(full_req_text)):
+                    meta = {
+                        **base_meta,
+                        "type":               "requirement",
+                        "requirement_id":     req["requirement_id"],
+                        "requirement_title":  req["title"],           # vollständiger Titel
+                        "level":              req["level"],
+                        "roles":              ", ".join(req["roles"]),
+                        "chunk_index":        i,
+                    }
+                    docs.append(Document(page_content=chunk, metadata=meta))
 
     return docs
 
@@ -209,31 +205,40 @@ def modules_to_documents(chapters: List[Dict[str, Any]]) -> List[Document]:  # t
 # CLI
 ###############################################################################
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="IT‑Grundschutz XML in hierarchisches JSON oder Chroma laden")
-    ap.add_argument("xml", help="Pfad zur grundschutz_2023.xml")
-    ap.add_argument("--mode", choices=["json", "vectordb"], default="json")
-    ap.add_argument("--output", default="out.json", help="JSON‑Datei oder Directory für Chroma")
-    args = ap.parse_args()
+def main():
+    parser = argparse.ArgumentParser(description="IT-Grundschutz XML → JSON oder VectorDB")
+    parser.add_argument("xml", help="Pfad zur XML-Datei")
+    parser.add_argument("--mode", choices=["json", "vectordb"], default="json")
+    parser.add_argument(
+        "--output",
+        help="JSON-Ausgabedatei (json) oder DB-Verzeichnis (vectordb)"
+    )
+    args = parser.parse_args()
+
+    # Standard-Pfade setzen
+    if not args.output:
+        args.output = (
+            "resources/requirements.json" if args.mode == "json" else "db"
+        )
 
     chapters = extract_structure(args.xml)
-    baustein_count = sum(len(c["modules"]) for c in chapters)
-    req_count = sum(len(m["requirements"]) for c in chapters for m in c["modules"])
+    bc = sum(len(c['modules']) for c in chapters)
+    rc = sum(len(m['requirements']) for c in chapters for m in c['modules'])
 
-    if args.mode == "json":
-        with open(args.output, "w", encoding="utf-8") as fh:
-            json.dump(chapters, fh, ensure_ascii=False, indent=2)
-        print(f"✅ {baustein_count} Bausteine, {req_count} Anforderungen in {len(chapters)} Kapiteln → {args.output}")
+    if args.mode == 'json':
+        os.makedirs(os.path.dirname(args.output), exist_ok=True)
+        with open(args.output, 'w', encoding='utf-8') as f:
+            json.dump(chapters, f, indent=2, ensure_ascii=False)
+        print(f"✅ JSON: {bc} Bausteine, {rc} Anforderungen in {len(chapters)} Kapiteln → {args.output}")
     else:
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise RuntimeError("OPENAI_API_KEY fehlt für vectordb‑Modus")
-        embeddings = OpenAIEmbeddings(openai_api_key=api_key)
+        key = os.getenv('OPENAI_API_KEY')
+        if not key:
+            raise RuntimeError('Missing OPENAI_API_KEY')
+        embeddings = OpenAIEmbeddings(openai_api_key=key)
         docs = modules_to_documents(chapters)
         vectordb = Chroma.from_documents(docs, embeddings, persist_directory=args.output)
-        vectordb.persist()
-        print(f"✅ {len(docs)} Dokumente (Module + Anforderungen) nach Chroma → {args.output}")
+        print(f"✅ Chroma: {len(docs)} Dokumente → {args.output}")
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
