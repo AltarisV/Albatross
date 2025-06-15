@@ -14,7 +14,7 @@ except ImportError:
     AgGrid = None
 
 load_dotenv()
-
+#haha nyan
 
 # --- DB laden ---
 @st.cache_data(show_spinner=False)
