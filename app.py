@@ -4,7 +4,6 @@ import re
 import streamlit as st
 import pandas as pd
 from io import BytesIO
-from docx import Document
 
 from langchain_community.embeddings import OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
@@ -18,17 +17,14 @@ load_dotenv()
 
 
 def _requirement_sort_key(rid: str):
-    # Extrahiere numerischen Teil nach 'A' am Ende, z.B. A17 → 17
     m = re.search(r"A(\d+)$", rid)
     return int(m.group(1)) if m else rid
 
 def _module_sort_key(mid: str):
-    # Extrahiere numerischen Teil nach dem letzten Punkt, z.B. INF.10 → 10
     m = re.search(r"\.(\d+)$", mid)
     return int(m.group(1)) if m else mid
 
 
-# --- DB laden ---
 @st.cache_data(show_spinner=False)
 def load_db(persist_dir: str, _embeds: OpenAIEmbeddings):
     vectordb = Chroma(persist_directory=persist_dir, embedding_function=_embeds)
@@ -37,7 +33,6 @@ def load_db(persist_dir: str, _embeds: OpenAIEmbeddings):
     return data['documents'], data['metadatas']
 
 
-# --- DataFrame für Explorer erzeugen ---
 def load_db_entries(persist_dir: str, embeds: OpenAIEmbeddings):
     docs, metas = load_db(persist_dir, embeds)
     rows = []
@@ -56,23 +51,22 @@ def load_db_entries(persist_dir: str, embeds: OpenAIEmbeddings):
             title = meta.get("Anforderung", meta.get("Anforderungsnummer", ""))
 
         rows.append({
-            "ID":                    idx,
-            "Art":                   art,
-            "Bausteinkategorie":     meta.get("bausteinkategorie_id", ""),
-            "Baustein":              meta.get("baustein_id", ""),
-            "Titel":                 title,
-            "Anforderungsnummer":    meta.get("Anforderungsnummer", ""),
-            "Gefährdungslage":       meta.get("Gefährdungslage", ""),
+            "ID": idx,
+            "Art": art,
+            "Bausteinkategorie": meta.get("bausteinkategorie_id", ""),
+            "Baustein": meta.get("baustein_id", ""),
+            "Titel": title,
+            "Anforderungsnummer": meta.get("Anforderungsnummer", ""),
+            "Gefährdungslage": meta.get("Gefährdungslage", ""),
             "Anforderungskategorie": meta.get("Anforderungskategorie", ""),
-            "Rollen":                rollen_str,
-            "Snippet":               (text.replace("\n", " ")[:300] + "…") if len(text) > 300 else text
+            "Rollen": rollen_str,
+            "Snippet": (text.replace("\n", " ")[:300] + "…") if len(text) > 300 else text
         })
 
     df = pd.DataFrame(rows)
     return df, docs, metas
 
 
-# --- Hierarchie aus Metadaten bauen ---
 @st.cache_data(show_spinner=False)
 def build_hierarchy(docs, metas):
     hier = {}
@@ -91,43 +85,27 @@ def build_hierarchy(docs, metas):
     return hier
 
 
-def build_docx(requirements):
-    """
-    Sortiert Anforderungen nach Bausteinkategorie, Baustein und erstellt ein DOCX.
-    """
-    sorted_reqs = sorted(
-        requirements,
-        key=lambda r: (
-            r['meta'].get('bausteinkategorie_id', ''),
-            r['meta'].get('baustein_id', ''),
-            _requirement_sort_key(r['meta'].get('Anforderungsnummer', ''))
-        )
-    )
-    doc = Document()
-    doc.add_heading("Ausgewählte Anforderungen", level=1)
-
-    current_kat = None
-    for req in sorted_reqs:
+def build_excel(requirements):
+    # Baue eine Zeile pro Anforderung
+    rows = []
+    for req in requirements:
         meta = req['meta']
-        kat = meta.get('bausteinkategorie_id')
-        if current_kat is not None and kat != current_kat:
-            doc.add_page_break()
-        current_kat = kat
-
-        title = meta.get('Anforderung', meta.get('Anforderungsnummer'))
-        doc.add_heading(title, level=2)
-        for _, chunk in req['chunks']:
-            doc.add_paragraph(chunk)
-        doc.add_paragraph(
-            f"ID: {meta.get('Anforderungsnummer')}  |  "
-            f"Kategorie: {meta.get('Anforderungskategorie')}  |  "
-            f"Rollen: {meta.get('Rollen')}",
-            style="IntenseQuote"
-        )
+        text = "\n\n".join(chunk for _, chunk in req['chunks'])
+        rows.append({
+            "Bausteinkategorie":     meta.get('bausteinkategorie_id'),
+            "Baustein":              meta.get('baustein_id'),
+            "Anforderungsnummer":    meta.get('Anforderungsnummer'),
+            "Anforderung":           meta.get('Anforderung'),
+            "Anforderungskategorie": meta.get('Anforderungskategorie'),
+            "Rollen":                meta.get('Rollen'),
+            "Text":                  text
+        })
+    df = pd.DataFrame(rows)
 
     buf = BytesIO()
-    doc.save(buf)
-    buf.seek(0)
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        df.to_excel(writer, index=False, sheet_name="Anforderungen")
+        buf.seek(0)
     return buf
 
 
@@ -137,10 +115,7 @@ def module_matches(info, query):
         return True
     if query in desc.lower():
         return True
-    for rid, req in sorted(
-            info['anforderungen'].items(),
-            key=lambda x: _requirement_sort_key(x[0])
-    ):
+    for rid, req in sorted(info['anforderungen'].items(), key=lambda x: _requirement_sort_key(x[0])):
         title = req['meta'].get('Anforderung', '').lower()
         if query in title:
             return True
@@ -156,12 +131,11 @@ def add_to_cart(meta, chunks):
         st.session_state.cart.append(entry)
 
 
-# --- Streamlit App ---
 def main():
     st.set_page_config(page_title='Kompendium Explorer', layout='wide')
     st.title('IT-Grundschutz Kompendium – Explorer')
 
-    # Sidebar: Ausgewählte Anforderungen
+    # Sidebar: Auswahl
     st.sidebar.header("Ausgewählte Anforderungen")
     if 'cart' not in st.session_state:
         st.session_state.cart = []
@@ -171,13 +145,19 @@ def main():
         cols[0].write(f"• {title}")
         if cols[1].button("✕", key=f"rem_{i}"):
             st.session_state.cart.pop(i)
+
     if st.session_state.cart:
-        buf = build_docx(st.session_state.cart)
-        st.sidebar.download_button("Download DOCX", data=buf, file_name="Anforderungen.docx")
+        # Excel statt DOCX
+        buf = build_excel(st.session_state.cart)
+        st.sidebar.download_button(
+            "Download Excel",
+            data=buf,
+            file_name="Anforderungen.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
     else:
         st.sidebar.write("_Keine Anforderungen ausgewählt_")
 
-    # Navigation
     page = st.sidebar.radio('Navigation', [
         'Datenbank Explorer',
         'Semantische Suche / Q&A',
@@ -190,23 +170,25 @@ def main():
         return
     embeds = OpenAIEmbeddings(openai_api_key=api_key)
 
-    # Datenbank Explorer
     if page == 'Datenbank Explorer':
         st.header('Datenbank Explorer')
         df, docs, metas = load_db_entries('db', embeds)
         st.markdown(f"**Gesamt:** {len(df)} Dokumente in der Vektor-DB")
         with st.sidebar:
             st.subheader('Filter')
-            art_sel    = st.multiselect('Dokument-Art', sorted(df['Art'].unique()), sorted(df['Art'].unique()))
-            kat_sel    = st.multiselect('Bausteinkategorie', sorted(df['Bausteinkategorie'].unique()), sorted(df['Bausteinkategorie'].unique()))
-            b_sel      = st.multiselect('Baustein', sorted(df['Baustein'].unique()), sorted(df['Baustein'].unique()))
-            katg_sel   = st.multiselect('Anforderungskategorie', sorted(df['Anforderungskategorie'].unique()), sorted(df['Anforderungskategorie'].unique()))
+            art_sel = st.multiselect('Dokument-Art', sorted(df['Art'].unique()), sorted(df['Art'].unique()))
+            kat_sel = st.multiselect('Bausteinkategorie', sorted(df['Bausteinkategorie'].unique()),
+                                     sorted(df['Bausteinkategorie'].unique()))
+            b_sel = st.multiselect('Baustein', sorted(df['Baustein'].unique()), sorted(df['Baustein'].unique()))
+            katg_sel = st.multiselect('Anforderungskategorie', sorted(df['Anforderungskategorie'].unique()),
+                                      sorted(df['Anforderungskategorie'].unique()))
             rollen_sel = st.multiselect(
                 'Rollen', sorted({r for row in df['Rollen'] for r in row.split(', ') if r}),
                 sorted({r for row in df['Rollen'] for r in row.split(', ') if r})
             )
-            sort_col   = st.selectbox('Sortiere nach', ['Bausteinkategorie','Baustein','Art','Anforderungskategorie','Titel'], index=0)
-            ascending  = st.checkbox('Aufsteigend', True)
+            sort_col = st.selectbox('Sortiere nach',
+                                    ['Bausteinkategorie', 'Baustein', 'Art', 'Anforderungskategorie', 'Titel'], index=0)
+            ascending = st.checkbox('Aufsteigend', True)
         mask = (
                 df['Art'].isin(art_sel) &
                 df['Bausteinkategorie'].isin(kat_sel) &
@@ -225,36 +207,39 @@ def main():
             sel = grid.get('selected_rows') or []
             if sel:
                 idx = sel[0]['_selectedRowNodeInfo']['nodeRowIndex']
-                st.markdown('---'); st.subheader('Detail'); st.write(docs[idx])
+                st.markdown('---');
+                st.subheader('Detail');
+                st.write(docs[idx])
         else:
             st.dataframe(df_filt, height=600)
 
-    # Semantische Suche / Q&A
     elif page == 'Semantische Suche / Q&A':
         st.header('Semantische Suche / Q&A')
         only_anf = st.checkbox('Nur nach Anforderungen suchen', value=False)
-        query    = st.text_input('Suche / Frage eingeben:')
-        k        = st.slider('Anzahl Ergebnisse', 1, 20, 5)
+        query = st.text_input('Suche / Frage eingeben:')
+        k = st.slider('Anzahl Ergebnisse', 1, 20, 5)
         if query:
             vdb = Chroma(persist_directory='db', embedding_function=embeds)
             if only_anf:
                 results = vdb.max_marginal_relevance_search(
-                    query, k=k, fetch_k=k*5, lambda_mult=0.7, filter={"Art":"Anforderung"}
+                    query, k=k, fetch_k=k * 5, lambda_mult=0.7, filter={"Art": "Anforderung"}
                 )
             else:
-                results = vdb.max_marginal_relevance_search(query, k=k, fetch_k=k*5, lambda_mult=0.7)
+                results = vdb.max_marginal_relevance_search(query, k=k, fetch_k=k * 5, lambda_mult=0.7)
             for i, doc in enumerate(results, 1):
-                meta   = doc.metadata
-                header = f"**{i}.** {meta.get('baustein_id','–')} • {meta.get('Art','–')}"
+                meta = doc.metadata
+                header = f"**{i}.** {meta.get('baustein_id', '–')} • {meta.get('Art', '–')}"
                 if meta.get('Anforderung'):
                     header += f" • {meta['Anforderung']}"
                 elif meta.get('Anforderungsnummer'):
                     header += f" • {meta['Anforderungsnummer']}"
                 if meta.get('Gefährdungslage'):
                     header += f" • {meta['Gefährdungslage']}"
-                st.markdown(header); st.write(doc.page_content); st.caption(meta); st.markdown('---')
+                st.markdown(header);
+                st.write(doc.page_content);
+                st.caption(meta);
+                st.markdown('---')
 
-    # Drilldown der Bausteine
     else:
         st.header('Drilldown der Bausteine')
 
@@ -278,7 +263,6 @@ def main():
             if not st.checkbox(f"{kat_id} – {kat_title}", key=f'kat_{kat_id}', value=bool(query)):
                 continue
 
-            # Bausteine numerisch sortiert
             for b_id, info in sorted(
                     modules.items(),
                     key=lambda x: _module_sort_key(x[0])
@@ -308,14 +292,16 @@ def main():
                         cols = st.columns([0.7, 0.15, 0.15])
                         if query:
                             cols[0].markdown(f"- **{title}**")
-                            if cols[1].button("＋", key=f"add_{kat_id}_{b_id}_{rid}", on_click=add_to_cart, args=(meta, req['chunks'])):
+                            if cols[1].button("＋", key=f"add_{kat_id}_{b_id}_{rid}", on_click=add_to_cart,
+                                              args=(meta, req['chunks'])):
                                 pass
                             for _, chunk in req['chunks']:
                                 st.write(chunk)
                             st.caption(meta)
                         else:
                             checked = cols[0].checkbox(title, key=f"tog_{kat_id}_{b_id}_{rid}")
-                            if cols[1].button("＋", key=f"add_{kat_id}_{b_id}_{rid}", on_click=add_to_cart, args=(meta, req['chunks'])):
+                            if cols[1].button("＋", key=f"add_{kat_id}_{b_id}_{rid}", on_click=add_to_cart,
+                                              args=(meta, req['chunks'])):
                                 pass
                             if checked:
                                 for _, chunk in req['chunks']:

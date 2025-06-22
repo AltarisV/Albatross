@@ -7,32 +7,23 @@ from typing import List, Dict, Any, Optional
 
 from dotenv import load_dotenv
 
-# Optional (nur benötigt für --mode vectordb)
-from langchain.schema import Document  # type: ignore
+from langchain.schema import Document
 
-# Embeddings: bevorzugt aus langchain_openai
 try:
     from langchain_openai import OpenAIEmbeddings
 except ImportError:
-    from langchain_community.embeddings import OpenAIEmbeddings  # fallback alte Version
+    from langchain_community.embeddings import OpenAIEmbeddings
 
-from langchain_community.vectorstores import Chroma  # type: ignore
+from langchain_community.vectorstores import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 load_dotenv()
 
-###############################################################################
-# Regex & XML-Namespace
-###############################################################################
 REQ_RE = re.compile(r"^[A-Z]+(?:\.\d+)+\.A\d+\b")  # Anforderungen
 MODULE_RE = re.compile(r"^([A-Z]+(?:\.\d+)+)\s+")  # Bausteine
-CHAPTER_RE = re.compile(r"^[A-Z]{2,5}\b")  # Kapitel-Kürzel
-NS = {"db": "http://docbook.org/ns/docbook"}  # DocBook-NS
+CHAPTER_RE = re.compile(r"^[A-Z]{2,5}\b")  # Bausteinkategorie
+NS = {"db": "http://docbook.org/ns/docbook"}
 
-
-###############################################################################
-# Hilfsfunktionen
-###############################################################################
 
 def _text_from_paras(el: ET.Element) -> str:
     paras = ["".join(p.itertext()).strip() for p in el.findall(".//db:para", NS)]
@@ -46,10 +37,6 @@ def _find_subsection(parent: ET.Element, title: str) -> Optional[ET.Element]:
             return sec
     return None
 
-
-###############################################################################
-# Struktur extrahieren
-###############################################################################
 
 def extract_structure(xml_path: str) -> List[Dict[str, Any]]:
     tree = ET.parse(xml_path)
@@ -81,12 +68,10 @@ def extract_structure(xml_path: str) -> List[Dict[str, Any]]:
             mod_id = m.group(1)
             mod_title = raw[len(mod_id):].strip()
 
-            # Deutsche Feldnamen für Modul-Infos
             beschreibung = _text_from_paras(_find_subsection(mod, "Beschreibung") or mod)
             zielsetzung = _text_from_paras(_find_subsection(mod, "Zielsetzung") or mod)
             abgrenzung = _text_from_paras(_find_subsection(mod, "Abgrenzung und Modellierung") or mod)
 
-            # Gefährdungen sammeln
             threats = []
             th_sec = _find_subsection(mod, "Gefährdungslage")
             if th_sec:
@@ -99,7 +84,6 @@ def extract_structure(xml_path: str) -> List[Dict[str, Any]]:
                         "text": _text_from_paras(t)
                     })
 
-            # Anforderungen sammeln
             requirements = []
             req_root = _find_subsection(mod, "Anforderungen")
             if req_root:
@@ -139,16 +123,7 @@ def extract_structure(xml_path: str) -> List[Dict[str, Any]]:
     return bausteinkategorien
 
 
-###############################################################################
-# Documents für Vektordb mit Chunking
-###############################################################################
-
 def modules_to_documents(bausteinkategorien: List[Dict[str, Any]]) -> List[Document]:
-    """
-    Flatten Bausteinkategorien, Bausteine, Gefahrenlagen und Anforderungen in
-    LangChain Documents, chunking langer Texte und Einbettung reichhaltiger
-    Metadaten mit deutschen Schlüsseln.
-    """
     docs: List[Document] = []
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
 
@@ -164,7 +139,6 @@ def modules_to_documents(bausteinkategorien: List[Dict[str, Any]]) -> List[Docum
                 "baustein_title": b["baustein_title"],
             }
 
-            # --- Baustein-Narrativ-Chunks ---
             full_text = "\n\n".join([
                 f"Beschreibung:\n{b['Beschreibung']}",
                 f"Zielsetzung:\n{b['Zielsetzung']}",
@@ -178,7 +152,6 @@ def modules_to_documents(bausteinkategorien: List[Dict[str, Any]]) -> List[Docum
                 }
                 docs.append(Document(page_content=chunk, metadata=meta))
 
-            # --- Gefahrenlage-Chunks ---
             for thr in b.get("threats", []):
                 thr_text = f"{thr['Gefährdungslage']}\n\n{thr['text']}"
                 for i, chunk in enumerate(splitter.split_text(thr_text)):
@@ -190,7 +163,6 @@ def modules_to_documents(bausteinkategorien: List[Dict[str, Any]]) -> List[Docum
                     }
                     docs.append(Document(page_content=chunk, metadata=meta))
 
-            # --- Anforderungs-Chunks ---
             for req in b.get("requirements", []):
                 for i, chunk in enumerate(splitter.split_text(req["text"])):
                     meta = {
@@ -206,10 +178,6 @@ def modules_to_documents(bausteinkategorien: List[Dict[str, Any]]) -> List[Docum
 
     return docs
 
-
-###############################################################################
-# CLI
-###############################################################################
 
 def main():
     parser = argparse.ArgumentParser(
