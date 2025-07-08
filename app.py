@@ -4,8 +4,10 @@ import re
 import streamlit as st
 import pandas as pd
 from io import BytesIO
+import torch
 
-from langchain_community.embeddings import OpenAIEmbeddings
+from langchain.embeddings.base import Embeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 
 try:
@@ -20,21 +22,22 @@ def _requirement_sort_key(rid: str):
     m = re.search(r"A(\d+)$", rid)
     return int(m.group(1)) if m else rid
 
+
 def _module_sort_key(mid: str):
     m = re.search(r"\.(\d+)$", mid)
     return int(m.group(1)) if m else mid
 
 
 @st.cache_data(show_spinner=False)
-def load_db(persist_dir: str, _embeds: OpenAIEmbeddings):
-    vectordb = Chroma(persist_directory=persist_dir, embedding_function=_embeds)
+def load_db(persist_dir: str, _embeddings: Embeddings):
+    vectordb = Chroma(persist_directory=persist_dir, embedding_function=_embeddings)
     col = vectordb._collection
     data = col.get(limit=col.count())
     return data['documents'], data['metadatas']
 
 
-def load_db_entries(persist_dir: str, embeds: OpenAIEmbeddings):
-    docs, metas = load_db(persist_dir, embeds)
+def load_db_entries(persist_dir: str, embeddings: Embeddings):
+    docs, metas = load_db(persist_dir, embeddings)
     rows = []
     for idx, (text, meta) in enumerate(zip(docs, metas)):
         raw_rollen = meta.get('Rollen', '')
@@ -92,13 +95,13 @@ def build_excel(requirements):
         meta = req['meta']
         text = "\n\n".join(chunk for _, chunk in req['chunks'])
         rows.append({
-            "Bausteinkategorie":     meta.get('bausteinkategorie_id'),
-            "Baustein":              meta.get('baustein_id'),
-            "Anforderungsnummer":    meta.get('Anforderungsnummer'),
-            "Anforderung":           meta.get('Anforderung'),
+            "Bausteinkategorie": meta.get('bausteinkategorie_id'),
+            "Baustein": meta.get('baustein_id'),
+            "Anforderungsnummer": meta.get('Anforderungsnummer'),
+            "Anforderung": meta.get('Anforderung'),
             "Anforderungskategorie": meta.get('Anforderungskategorie'),
-            "Rollen":                meta.get('Rollen'),
-            "Text":                  text
+            "Rollen": meta.get('Rollen'),
+            "Text": text
         })
     df = pd.DataFrame(rows)
 
@@ -164,15 +167,16 @@ def main():
         'Drilldown der Bausteine'
     ])
 
-    api_key = os.getenv('OPENAI_API_KEY')
-    if not api_key:
-        st.error('OPENAI_API_KEY fehlt in der Umgebung')
-        return
-    embeds = OpenAIEmbeddings(openai_api_key=api_key)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    embeddings = HuggingFaceEmbeddings(
+        model_name="BAAI/bge-m3",
+        model_kwargs={"device": device},
+        encode_kwargs={"normalize_embeddings": True}
+    )
 
     if page == 'Datenbank Explorer':
         st.header('Datenbank Explorer')
-        df, docs, metas = load_db_entries('db', embeds)
+        df, docs, metas = load_db_entries('db', embeddings)
         st.markdown(f"**Gesamt:** {len(df)} Dokumente in der Vektor-DB")
         with st.sidebar:
             st.subheader('Filter')
@@ -207,8 +211,8 @@ def main():
             sel = grid.get('selected_rows') or []
             if sel:
                 idx = sel[0]['_selectedRowNodeInfo']['nodeRowIndex']
-                st.markdown('---');
-                st.subheader('Detail');
+                st.markdown('---')
+                st.subheader('Detail')
                 st.write(docs[idx])
         else:
             st.dataframe(df_filt, height=600)
@@ -219,7 +223,7 @@ def main():
         query = st.text_input('Suche / Frage eingeben:')
         k = st.slider('Anzahl Ergebnisse', 1, 20, 5)
         if query:
-            vdb = Chroma(persist_directory='db', embedding_function=embeds)
+            vdb = Chroma(persist_directory='db', embedding_function=embeddings)
             if only_anf:
                 results = vdb.max_marginal_relevance_search(
                     query, k=k, fetch_k=k * 5, lambda_mult=0.7, filter={"Art": "Anforderung"}
@@ -235,9 +239,9 @@ def main():
                     header += f" • {meta['Anforderungsnummer']}"
                 if meta.get('Gefährdungslage'):
                     header += f" • {meta['Gefährdungslage']}"
-                st.markdown(header);
-                st.write(doc.page_content);
-                st.caption(meta);
+                st.markdown(header)
+                st.write(doc.page_content)
+                st.caption(meta)
                 st.markdown('---')
 
     else:
@@ -250,7 +254,7 @@ def main():
         )
 
         query = st.text_input("Schnellsuche (z.B. 'Server')").strip().lower()
-        docs, metas = load_db('db', embeds)
+        docs, metas = load_db('db', embeddings)
         hier = build_hierarchy(docs, metas)
 
         for kat_id, modules in sorted(hier.items()):

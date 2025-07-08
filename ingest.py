@@ -4,15 +4,13 @@ import json
 import re
 import xml.etree.ElementTree as ET
 from typing import List, Dict, Any, Optional
+import torch
 
 from dotenv import load_dotenv
 
 from langchain.schema import Document
 
-try:
-    from langchain_openai import OpenAIEmbeddings
-except ImportError:
-    from langchain_community.embeddings import OpenAIEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 
 from langchain_community.vectorstores import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -209,10 +207,12 @@ def main():
         print(
             f"✅ JSON: {bc} Bausteine, {rc} Anforderungen in {len(bausteinkategorien)} Bausteinkategorien → {args.output}")
     else:
-        key = os.getenv('OPENAI_API_KEY')
-        if not key:
-            raise RuntimeError('Missing OPENAI_API_KEY')
-        embeddings = OpenAIEmbeddings(openai_api_key=key)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        embeddings = HuggingFaceEmbeddings(
+            model_name="BAAI/bge-m3",
+            model_kwargs={"device": device},
+            encode_kwargs={"normalize_embeddings": True}
+        )
         docs = modules_to_documents(bausteinkategorien)
         vectordb = Chroma.from_documents(
             docs,
