@@ -7,8 +7,8 @@ from io import BytesIO
 import torch
 
 from langchain.embeddings.base import Embeddings
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_chroma import Chroma
 
 try:
     from st_aggrid import AgGrid, GridOptionsBuilder  # optionales Grid
@@ -134,11 +134,52 @@ def add_to_cart(meta, chunks):
         st.session_state.cart.append(entry)
 
 
-def main():
-    st.set_page_config(page_title='Kompendium Explorer', layout='wide')
-    st.title('IT-Grundschutz Kompendium – Explorer')
+@st.cache_resource(show_spinner=False)
+def get_embeddings():
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    return HuggingFaceEmbeddings(
+        model_name="BAAI/bge-m3",
+        model_kwargs={"device": device},
+        encode_kwargs={"normalize_embeddings": True}
+    )
 
-    # Sidebar: Auswahl
+
+@st.cache_resource(show_spinner=False)
+def get_vectordb(_embeddings):
+    return Chroma(
+        persist_directory='db',
+        embedding_function=_embeddings
+    )
+
+
+def main():
+    st.set_page_config(page_title='Kompendium Explorer',
+                       layout='wide')
+
+    st.sidebar.markdown("### Status")
+    status = st.sidebar.empty()
+
+    if 'model_loaded' not in st.session_state:
+        status.info("📦 Lade Embedding-Modell…")
+        embeddings = get_embeddings()
+        _ = embeddings.embed_query("initialisierung")
+        status.success("✅ Modell bereit")
+        status.info("📡 Lade Vektor-Datenbank…")
+        vectordb = get_vectordb(embeddings)
+        status.success("✅ Alles bereit")
+        st.session_state['embeddings'] = embeddings
+        st.session_state['vectordb'] = vectordb
+        st.session_state['model_loaded'] = True
+    else:
+        # Bei allen weiteren Runs direkt aus dem Cache holen
+        embeddings = st.session_state['embeddings']
+        vectordb = st.session_state['vectordb']
+        status.success("✅ App bereit")
+
+    # Daten laden (kann mit cache_data bleiben)
+    df, docs, metas = load_db_entries('db', embeddings)
+
+    # Sidebar: Auswahl-Widget für Cart
     st.sidebar.header("Ausgewählte Anforderungen")
     if 'cart' not in st.session_state:
         st.session_state.cart = []
@@ -150,7 +191,6 @@ def main():
             st.session_state.cart.pop(i)
 
     if st.session_state.cart:
-        # Excel statt DOCX
         buf = build_excel(st.session_state.cart)
         st.sidebar.download_button(
             "Download Excel",
@@ -161,23 +201,19 @@ def main():
     else:
         st.sidebar.write("_Keine Anforderungen ausgewählt_")
 
+    # Navigation
     page = st.sidebar.radio('Navigation', [
         'Datenbank Explorer',
         'Semantische Suche / Q&A',
         'Drilldown der Bausteine'
     ])
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    embeddings = HuggingFaceEmbeddings(
-        model_name="BAAI/bge-m3",
-        model_kwargs={"device": device},
-        encode_kwargs={"normalize_embeddings": True}
-    )
-
+    # ─── Datenbank Explorer ───
     if page == 'Datenbank Explorer':
         st.header('Datenbank Explorer')
-        df, docs, metas = load_db_entries('db', embeddings)
         st.markdown(f"**Gesamt:** {len(df)} Dokumente in der Vektor-DB")
+
+        # Filter‐Sidebar
         with st.sidebar:
             st.subheader('Filter')
             art_sel = st.multiselect('Dokument-Art', sorted(df['Art'].unique()), sorted(df['Art'].unique()))
@@ -186,13 +222,12 @@ def main():
             b_sel = st.multiselect('Baustein', sorted(df['Baustein'].unique()), sorted(df['Baustein'].unique()))
             katg_sel = st.multiselect('Anforderungskategorie', sorted(df['Anforderungskategorie'].unique()),
                                       sorted(df['Anforderungskategorie'].unique()))
-            rollen_sel = st.multiselect(
-                'Rollen', sorted({r for row in df['Rollen'] for r in row.split(', ') if r}),
-                sorted({r for row in df['Rollen'] for r in row.split(', ') if r})
-            )
+            rollen_sel = st.multiselect('Rollen', sorted({r for row in df['Rollen'] for r in row.split(', ') if r}),
+                                        sorted({r for row in df['Rollen'] for r in row.split(', ') if r}))
             sort_col = st.selectbox('Sortiere nach',
                                     ['Bausteinkategorie', 'Baustein', 'Art', 'Anforderungskategorie', 'Titel'], index=0)
             ascending = st.checkbox('Aufsteigend', True)
+
         mask = (
                 df['Art'].isin(art_sel) &
                 df['Bausteinkategorie'].isin(kat_sel) &
@@ -202,6 +237,7 @@ def main():
                  df['Rollen'].apply(lambda rs: any(r in rs for r in rollen_sel)))
         )
         df_filt = df[mask].sort_values(by=sort_col, ascending=ascending).reset_index(drop=True)
+
         st.subheader('Gefilterte Dokumente')
         if AgGrid:
             gb = GridOptionsBuilder.from_dataframe(df_filt)
@@ -217,19 +253,24 @@ def main():
         else:
             st.dataframe(df_filt, height=600)
 
+    # ─── Semantische Suche / Q&A ───
     elif page == 'Semantische Suche / Q&A':
         st.header('Semantische Suche / Q&A')
         only_anf = st.checkbox('Nur nach Anforderungen suchen', value=False)
         query = st.text_input('Suche / Frage eingeben:')
         k = st.slider('Anzahl Ergebnisse', 1, 20, 5)
+
         if query:
-            vdb = Chroma(persist_directory='db', embedding_function=embeddings)
             if only_anf:
-                results = vdb.max_marginal_relevance_search(
-                    query, k=k, fetch_k=k * 5, lambda_mult=0.7, filter={"Art": "Anforderung"}
+                results = vectordb.max_marginal_relevance_search(
+                    query, k=k, fetch_k=k * 5, lambda_mult=0.7,
+                    filter={"Art": "Anforderung"}
                 )
             else:
-                results = vdb.max_marginal_relevance_search(query, k=k, fetch_k=k * 5, lambda_mult=0.7)
+                results = vectordb.max_marginal_relevance_search(
+                    query, k=k, fetch_k=k * 5, lambda_mult=0.7
+                )
+
             for i, doc in enumerate(results, 1):
                 meta = doc.metadata
                 header = f"**{i}.** {meta.get('baustein_id', '–')} • {meta.get('Art', '–')}"
@@ -244,6 +285,7 @@ def main():
                 st.caption(meta)
                 st.markdown('---')
 
+    # ─── Drilldown der Bausteine ───
     else:
         st.header('Drilldown der Bausteine')
 
@@ -252,9 +294,7 @@ def main():
             value=False,
             help='Anforderungen mit "ENTFALLEN" im Titel standardmäßig verbergen'
         )
-
         query = st.text_input("Schnellsuche (z.B. 'Server')").strip().lower()
-        docs, metas = load_db('db', embeddings)
         hier = build_hierarchy(docs, metas)
 
         for kat_id, modules in sorted(hier.items()):
@@ -267,21 +307,14 @@ def main():
             if not st.checkbox(f"{kat_id} – {kat_title}", key=f'kat_{kat_id}', value=bool(query)):
                 continue
 
-            for b_id, info in sorted(
-                    modules.items(),
-                    key=lambda x: _module_sort_key(x[0])
-            ):
+            for b_id, info in sorted(modules.items(), key=lambda x: _module_sort_key(x[0])):
                 if query and not module_matches(info, query):
                     continue
                 _, desc, b_meta = info['baustein_docs'][0]
-                label = f"{b_id} – {b_meta.get('baustein_title', b_id)}"
-                with st.expander(label, expanded=bool(query)):
+                with st.expander(f"{b_id} – {b_meta.get('baustein_title', b_id)}", expanded=bool(query)):
                     st.write(desc)
                     st.markdown("**Anforderungen:**")
-                    for rid, req in sorted(
-                            info['anforderungen'].items(),
-                            key=lambda x: _requirement_sort_key(x[0])
-                    ):
+                    for rid, req in sorted(info['anforderungen'].items(), key=lambda x: _requirement_sort_key(x[0])):
                         meta = req['meta']
                         title = meta.get('Anforderung', rid)
                         if not show_entfallen and "ENTFALLEN" in title:
