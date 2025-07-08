@@ -230,11 +230,6 @@ def main():
                                       sorted(df['Anforderungskategorie'].unique()))
             rollen_sel = st.multiselect('Rollen', sorted({r for row in df['Rollen'] for r in row.split(', ') if r}),
                                         sorted({r for row in df['Rollen'] for r in row.split(', ') if r}))
-            rollen_sel = st.multiselect(
-                'Rollen',
-                sorted({r for row in df['Rollen'] for r in row.split(', ') if r}),
-                sorted({r for row in df['Rollen'] for r in row.split(', ') if r})
-            )
             gef_sel = st.multiselect(
                 'Zugeordnete Gefahren',
                 options=sorted(df['Zugeordnete Gefahren'].unique()),
