@@ -97,6 +97,11 @@ def build_excel(requirements):
     for req in requirements:
         meta = req['meta']
         text = "\n\n".join(chunk for _, chunk in req['chunks'])
+        gef_h_ids = meta.get("zugeordnete_gefahren", [])
+        gef_h_titel = meta.get("zugeordnete_gefahren_titel", [])
+        gef_h_ids_str = ", ".join(gef_h_ids) if isinstance(gef_h_ids, list) else gef_h_ids
+        gef_h_titel_str = ", ".join(gef_h_titel) if isinstance(gef_h_titel, list) else gef_h_titel
+
         rows.append({
             "Bausteinkategorie": meta.get('bausteinkategorie_id'),
             "Baustein": meta.get('baustein_id'),
@@ -104,8 +109,11 @@ def build_excel(requirements):
             "Anforderung": meta.get('Anforderung'),
             "Anforderungskategorie": meta.get('Anforderungskategorie'),
             "Rollen": meta.get('Rollen'),
+            "Zugeordnete Gefahren (IDs)": gef_h_ids_str,
+            "Zugeordnete Gefahren (Titel)": gef_h_titel_str,
             "Text": text
         })
+
     df = pd.DataFrame(rows)
 
     buf = BytesIO()
