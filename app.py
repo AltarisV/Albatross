@@ -20,6 +20,7 @@ def _requirement_sort_key(rid: str):
     m = re.search(r"A(\d+)$", rid)
     return int(m.group(1)) if m else rid
 
+
 def _module_sort_key(mid: str):
     m = re.search(r"\.(\d+)$", mid)
     return int(m.group(1)) if m else mid
@@ -43,12 +44,17 @@ def load_db_entries(persist_dir: str, embeds: OpenAIEmbeddings):
         art = meta.get('Art', 'Baustein')
         if art == "Baustein":
             title = meta.get("baustein_id", "")
-            if meta.get("baustein_title"):
-                title += " – " + meta["baustein_title"]
+            if meta.get("baustein_titel"):
+                title += " – " + meta["baustein_titel"]
         elif art == "Gefahrenlage":
-            title = meta.get('Gefährdungslage', '')
+            title = meta.get('GefahrenID', '')
         else:  # Anforderung
             title = meta.get("Anforderung", meta.get("Anforderungsnummer", ""))
+
+        # neue Felder aus den Metadaten
+        gef_h_ids = meta.get("zugeordnete_gefahren", [])
+        gef_h_titel = meta.get("zugeordnete_gefahren_titel", [])
+        gef_h_str = ", ".join(gef_h_titel) if isinstance(gef_h_titel, list) else gef_h_titel
 
         rows.append({
             "ID": idx,
@@ -57,9 +63,10 @@ def load_db_entries(persist_dir: str, embeds: OpenAIEmbeddings):
             "Baustein": meta.get("baustein_id", ""),
             "Titel": title,
             "Anforderungsnummer": meta.get("Anforderungsnummer", ""),
-            "Gefährdungslage": meta.get("Gefährdungslage", ""),
+            "Gefährdungslage": meta.get("GefahrenID", ""),
             "Anforderungskategorie": meta.get("Anforderungskategorie", ""),
             "Rollen": rollen_str,
+            "Zugeordnete Gefahren": gef_h_str,
             "Snippet": (text.replace("\n", " ")[:300] + "…") if len(text) > 300 else text
         })
 
@@ -86,20 +93,27 @@ def build_hierarchy(docs, metas):
 
 
 def build_excel(requirements):
-    # Baue eine Zeile pro Anforderung
     rows = []
     for req in requirements:
         meta = req['meta']
         text = "\n\n".join(chunk for _, chunk in req['chunks'])
+        gef_h_ids = meta.get("zugeordnete_gefahren", [])
+        gef_h_titel = meta.get("zugeordnete_gefahren_titel", [])
+        gef_h_ids_str = ", ".join(gef_h_ids) if isinstance(gef_h_ids, list) else gef_h_ids
+        gef_h_titel_str = ", ".join(gef_h_titel) if isinstance(gef_h_titel, list) else gef_h_titel
+
         rows.append({
-            "Bausteinkategorie":     meta.get('bausteinkategorie_id'),
-            "Baustein":              meta.get('baustein_id'),
-            "Anforderungsnummer":    meta.get('Anforderungsnummer'),
-            "Anforderung":           meta.get('Anforderung'),
+            "Bausteinkategorie": meta.get('bausteinkategorie_id'),
+            "Baustein": meta.get('baustein_id'),
+            "Anforderungsnummer": meta.get('Anforderungsnummer'),
+            "Anforderung": meta.get('Anforderung'),
             "Anforderungskategorie": meta.get('Anforderungskategorie'),
-            "Rollen":                meta.get('Rollen'),
-            "Text":                  text
+            "Rollen": meta.get('Rollen'),
+            "Zugeordnete Gefahren (IDs)": gef_h_ids_str,
+            "Zugeordnete Gefahren (Titel)": gef_h_titel_str,
+            "Text": text
         })
+
     df = pd.DataFrame(rows)
 
     buf = BytesIO()
@@ -111,7 +125,7 @@ def build_excel(requirements):
 
 def module_matches(info, query):
     _, desc, meta = info['baustein_docs'][0]
-    if query in meta.get('baustein_title', '').lower():
+    if query in meta.get('baustein_titel', '').lower():
         return True
     if query in desc.lower():
         return True
@@ -135,7 +149,7 @@ def main():
     st.set_page_config(page_title='Kompendium Explorer', layout='wide')
     st.title('IT-Grundschutz Kompendium – Explorer')
 
-    # Sidebar: Auswahl
+    # Sidebar für Auswahl
     st.sidebar.header("Ausgewählte Anforderungen")
     if 'cart' not in st.session_state:
         st.session_state.cart = []
@@ -147,7 +161,6 @@ def main():
             st.session_state.cart.pop(i)
 
     if st.session_state.cart:
-        # Excel statt DOCX
         buf = build_excel(st.session_state.cart)
         st.sidebar.download_button(
             "Download Excel",
@@ -174,6 +187,8 @@ def main():
         st.header('Datenbank Explorer')
         df, docs, metas = load_db_entries('db', embeds)
         st.markdown(f"**Gesamt:** {len(df)} Dokumente in der Vektor-DB")
+
+        # Filter-Sidebar
         with st.sidebar:
             st.subheader('Filter')
             art_sel = st.multiselect('Dokument-Art', sorted(df['Art'].unique()), sorted(df['Art'].unique()))
@@ -183,22 +198,32 @@ def main():
             katg_sel = st.multiselect('Anforderungskategorie', sorted(df['Anforderungskategorie'].unique()),
                                       sorted(df['Anforderungskategorie'].unique()))
             rollen_sel = st.multiselect(
-                'Rollen', sorted({r for row in df['Rollen'] for r in row.split(', ') if r}),
+                'Rollen',
+                sorted({r for row in df['Rollen'] for r in row.split(', ') if r}),
                 sorted({r for row in df['Rollen'] for r in row.split(', ') if r})
+            )
+            gef_sel = st.multiselect(
+                'Zugeordnete Gefahren',
+                options=sorted(df['Zugeordnete Gefahren'].unique()),
+                default=[]
             )
             sort_col = st.selectbox('Sortiere nach',
                                     ['Bausteinkategorie', 'Baustein', 'Art', 'Anforderungskategorie', 'Titel'], index=0)
             ascending = st.checkbox('Aufsteigend', True)
+
         mask = (
                 df['Art'].isin(art_sel) &
                 df['Bausteinkategorie'].isin(kat_sel) &
                 df['Baustein'].isin(b_sel) &
                 df['Anforderungskategorie'].isin(katg_sel) &
                 ((df['Art'] != 'Anforderung') |
-                 df['Rollen'].apply(lambda rs: any(r in rs for r in rollen_sel)))
+                 df['Rollen'].apply(lambda rs: any(r in rs for r in rollen_sel))) &
+                df['Zugeordnete Gefahren'].apply(lambda s: all(g in s for g in gef_sel))
         )
+
         df_filt = df[mask].sort_values(by=sort_col, ascending=ascending).reset_index(drop=True)
         st.subheader('Gefilterte Dokumente')
+
         if AgGrid:
             gb = GridOptionsBuilder.from_dataframe(df_filt)
             gb.configure_default_column(editable=False, wrapText=True, autoHeight=True)
@@ -207,8 +232,8 @@ def main():
             sel = grid.get('selected_rows') or []
             if sel:
                 idx = sel[0]['_selectedRowNodeInfo']['nodeRowIndex']
-                st.markdown('---');
-                st.subheader('Detail');
+                st.markdown('---')
+                st.subheader('Detail')
                 st.write(docs[idx])
         else:
             st.dataframe(df_filt, height=600)
@@ -218,6 +243,7 @@ def main():
         only_anf = st.checkbox('Nur nach Anforderungen suchen', value=False)
         query = st.text_input('Suche / Frage eingeben:')
         k = st.slider('Anzahl Ergebnisse', 1, 20, 5)
+
         if query:
             vdb = Chroma(persist_directory='db', embedding_function=embeds)
             if only_anf:
@@ -233,11 +259,11 @@ def main():
                     header += f" • {meta['Anforderung']}"
                 elif meta.get('Anforderungsnummer'):
                     header += f" • {meta['Anforderungsnummer']}"
-                if meta.get('Gefährdungslage'):
-                    header += f" • {meta['Gefährdungslage']}"
-                st.markdown(header);
-                st.write(doc.page_content);
-                st.caption(meta);
+                if meta.get('GefahrenID'):
+                    header += f" • {meta['GefahrenID']}"
+                st.markdown(header)
+                st.write(doc.page_content)
+                st.caption(meta)
                 st.markdown('---')
 
     else:
@@ -248,7 +274,6 @@ def main():
             value=False,
             help='Anforderungen mit "ENTFALLEN" im Titel standardmäßig verbergen'
         )
-
         query = st.text_input("Schnellsuche (z.B. 'Server')").strip().lower()
         docs, metas = load_db('db', embeds)
         hier = build_hierarchy(docs, metas)
@@ -257,27 +282,21 @@ def main():
             if query and not any(module_matches(info, query) for info in modules.values()):
                 continue
             kat_title = next(
-                (m.get('bausteinkategorie_title') for m in metas if m.get('bausteinkategorie_id') == kat_id),
+                (m.get('bausteinkategorie_titel') for m in metas if m.get('bausteinkategorie_id') == kat_id),
                 kat_id
             )
             if not st.checkbox(f"{kat_id} – {kat_title}", key=f'kat_{kat_id}', value=bool(query)):
                 continue
 
-            for b_id, info in sorted(
-                    modules.items(),
-                    key=lambda x: _module_sort_key(x[0])
-            ):
+            for b_id, info in sorted(modules.items(), key=lambda x: _module_sort_key(x[0])):
                 if query and not module_matches(info, query):
                     continue
                 _, desc, b_meta = info['baustein_docs'][0]
-                label = f"{b_id} – {b_meta.get('baustein_title', b_id)}"
+                label = f"{b_id} – {b_meta.get('baustein_titel', b_id)}"
                 with st.expander(label, expanded=bool(query)):
                     st.write(desc)
                     st.markdown("**Anforderungen:**")
-                    for rid, req in sorted(
-                            info['anforderungen'].items(),
-                            key=lambda x: _requirement_sort_key(x[0])
-                    ):
+                    for rid, req in sorted(info['anforderungen'].items(), key=lambda x: _requirement_sort_key(x[0])):
                         meta = req['meta']
                         title = meta.get('Anforderung', rid)
                         if not show_entfallen and "ENTFALLEN" in title:
@@ -298,6 +317,9 @@ def main():
                             for _, chunk in req['chunks']:
                                 st.write(chunk)
                             st.caption(meta)
+                            # hier Gefahren-Titel unter jeder Anforderung
+                            if meta.get("zugeordnete_gefahren_titel"):
+                                st.markdown(f"**Zugeordnete Gefahren:** {meta['zugeordnete_gefahren_titel']}")
                         else:
                             checked = cols[0].checkbox(title, key=f"tog_{kat_id}_{b_id}_{rid}")
                             if cols[1].button("＋", key=f"add_{kat_id}_{b_id}_{rid}", on_click=add_to_cart,
@@ -307,6 +329,8 @@ def main():
                                 for _, chunk in req['chunks']:
                                     st.write(chunk)
                                 st.caption(meta)
+                                if meta.get("zugeordnete_gefahren_titel"):
+                                    st.markdown(f"**Zugeordnete Gefahren:** {meta['zugeordnete_gefahren_titel']}")
 
 
 if __name__ == '__main__':
