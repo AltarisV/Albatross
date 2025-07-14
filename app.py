@@ -24,8 +24,20 @@ def _requirement_sort_key(rid: str):
 
 
 def _module_sort_key(mid: str):
-    m = re.search(r"\.(\d+)$", mid)
-    return int(m.group(1)) if m else mid
+    """
+    Liefert für IDs wie "APP.2.3" ein Tuple (2,3),
+    für alle anderen Fälle ein sehr großes Tuple, so dass sie ans Ende wandern.
+    """
+    nums = re.findall(r'\d+', mid)
+    if len(nums) >= 2:
+        # z.B. ["2","3"] → (2,3)
+        return int(nums[0]), int(nums[1])
+    elif len(nums) == 1:
+        # z.B. "APP.12" → (12, 0)
+        return int(nums[0]), 0
+    else:
+        # kein Zahlen­match → ans Ende sortieren
+        return float('inf'), float('inf')
 
 
 @st.cache_data(show_spinner=False)
