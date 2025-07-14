@@ -230,7 +230,7 @@ def main():
 
     page = st.sidebar.radio('Navigation', [
         'Datenbank Explorer',
-        'Semantische Suche / Q&A',
+        'Semantische Suche',
         'Drilldown der Bausteine'
     ])
 
@@ -285,8 +285,8 @@ def main():
         else:
             st.dataframe(df_filt, height=600)
 
-    elif page == 'Semantische Suche / Q&A':
-        st.header('Semantische Suche / Q&A')
+    elif page == 'Semantische Suche':
+        st.header('Semantische Suche')
         only_anf = st.checkbox('Nur nach Anforderungen suchen', value=False)
         query = st.text_input('Suche / Frage eingeben:')
         k = st.slider('Anzahl Ergebnisse', 1, 20, 5)
@@ -311,9 +311,13 @@ def main():
                     header += f" • {meta['Anforderungsnummer']}"
                 if meta.get('GefahrenID'):
                     header += f" • {meta['GefahrenID']}"
-                st.markdown(header)
-                st.write(doc.page_content)
-                st.caption(meta)
+                cols = st.columns([0.8, 0.2])
+                cols[0].markdown(header)
+                if cols[1].button("＋", key=f"add_qa_{i}", on_click=add_to_cart,
+                                  args=(meta, [(None, doc.page_content)])):
+                    st.success("Anforderung hinzugefügt", icon="✅")
+                cols[0].write(doc.page_content)
+                cols[0].caption(meta)
                 st.markdown('---')
 
     else:
