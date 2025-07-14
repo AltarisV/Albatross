@@ -37,24 +37,30 @@ def _find_subsection(parent: ET.Element, title: str) -> Optional[ET.Element]:
     return None
 
 
-def load_excel_mapping(excel_path: str) -> Dict[str, List[str]]:
+def load_excel_mapping(excel_path: str) -> (Dict[str, List[str]], Dict[str, str]):
     """
     Liest alle Sheets der Excel-Datei ein und erstellt ein Dict:
       { Anforderungs-ID: [Gefahren-ID, …], … }
     """
     mapping: Dict[str, List[str]] = {}
+    cia_map: Dict[str, str] = {}
     sheets = pd.read_excel(excel_path, sheet_name=None)
     for df in sheets.values():
         req_ids = df.iloc[:, 0].fillna("").astype(str)
         threat_cols = df.columns[3:]
         flag_matrix = df.iloc[:, 3:].fillna("")
+        # Spalte CIA (Index 2) holen
+        if 'CIA' not in df.columns:
+            continue
+        cia_vals = df['CIA'].fillna("").astype(str)
         for idx, rid in enumerate(req_ids):
             if not rid.strip():
                 continue
             vals = flag_matrix.iloc[idx]
             zugeordnete = [col for col, mark in zip(threat_cols, vals) if str(mark).strip()]
             mapping[rid] = zugeordnete
-    return mapping
+            cia_map[rid] = cia_vals.iloc[idx].strip()
+    return mapping, cia_map
 
 
 def load_threat_titles(xml_path: str) -> Dict[str, str]:
@@ -84,7 +90,8 @@ def load_threat_titles(xml_path: str) -> Dict[str, str]:
 def extract_structure(
         xml_path: str,
         gefahr_map: Dict[str, List[str]],
-        gefahr_titel: Dict[str, str]
+        gefahr_titel: Dict[str, str],
+        cia_map: Dict[str, str]
 ) -> List[Dict[str, Any]]:
     """
     Lädt das XML, splittert Text, extrahiert Bausteine und Anforderungen
@@ -155,6 +162,11 @@ def extract_structure(
 
                     zugeordnete = gefahr_map.get(rid, [])
                     titel_list = [gefahr_titel.get(g, g) for g in zugeordnete]
+                    # CIA-Rohwert in drei bools aufteilen
+                    raw_cia = cia_map.get(rid, "")
+                    vertraulichkeit = "C" in raw_cia
+                    integritaet = "I" in raw_cia
+                    verfuegbarkeit = "A" in raw_cia
 
                     requirements.append({
                         "Anforderungsnummer": rid,
@@ -163,7 +175,10 @@ def extract_structure(
                         "Rollen": rollen,
                         "zugeordnete_gefahren": zugeordnete,
                         "zugeordnete_gefahren_titel": titel_list,
-                        "text": _text_from_paras(r)
+                        "text": _text_from_paras(r),
+                        "Vertraulichkeit": vertraulichkeit,
+                        "Integrität": integritaet,
+                        "Verfügbarkeit": verfuegbarkeit
                     })
 
             kat["bausteine"].append({
@@ -231,7 +246,10 @@ def modules_to_documents(bausteinkategorien: List[Dict[str, Any]]) -> List[Docum
                         "Rollen": ", ".join(req["Rollen"]),
                         "zugeordnete_gefahren": ", ".join(req["zugeordnete_gefahren"]),
                         "zugeordnete_gefahren_titel": ", ".join(req["zugeordnete_gefahren_titel"]),
-                        "chunk_index": i
+                        "chunk_index": i,
+                        "Vertraulichkeit": req["Vertraulichkeit"],
+                        "Integrität": req["Integrität"],
+                        "Verfügbarkeit": req["Verfügbarkeit"]
                     }
                     docs.append(Document(page_content=chunk, metadata=meta))
 
@@ -248,10 +266,10 @@ def main():
     xml_path = args.xml
     out = args.output or ("resources/requirements.json" if args.mode == "json" else "db")
 
-    gefahr_map = load_excel_mapping(EXCEL_MAP_FILE)
+    gefahr_map, cia_map = load_excel_mapping(EXCEL_MAP_FILE)
     gefahr_titel = load_threat_titles(xml_path)
 
-    bausteinkategorien = extract_structure(xml_path, gefahr_map, gefahr_titel)
+    bausteinkategorien = extract_structure(xml_path, gefahr_map, gefahr_titel, cia_map)
     bc = sum(len(k["bausteine"]) for k in bausteinkategorien)
     rc = sum(len(b["requirements"]) for k in bausteinkategorien for b in k["bausteine"])
 

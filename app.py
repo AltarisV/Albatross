@@ -68,6 +68,9 @@ def load_db_entries(persist_dir: str, embeddings: Embeddings):
             "Anforderungskategorie": meta.get("Anforderungskategorie", ""),
             "Rollen": rollen_str,
             "Zugeordnete Gefahren": gef_h_str,
+            "Vertraulichkeit": meta.get("Vertraulichkeit", False),
+            "Integrität": meta.get("Integrität", False),
+            "Verfügbarkeit": meta.get("Verfügbarkeit", False),
             "Snippet": (text.replace("\n", " ")[:300] + "…") if len(text) > 300 else text
         })
 
@@ -112,6 +115,9 @@ def build_excel(requirements):
             "Rollen": meta.get('Rollen'),
             "Zugeordnete Gefahren (IDs)": gef_h_ids_str,
             "Zugeordnete Gefahren (Titel)": gef_h_titel_str,
+            "Vertraulichkeit": meta.get("Vertraulichkeit", False),
+            "Integrität": meta.get("Integrität", False),
+            "Verfügbarkeit": meta.get("Verfügbarkeit", False),
             "Text": text
         })
 
@@ -306,6 +312,11 @@ def main():
             value=False,
             help='Anforderungen mit "ENTFALLEN" im Titel standardmäßig verbergen'
         )
+        cia_sel = st.multiselect(
+            'Schutzziele filtern',
+            options=["Vertraulichkeit","Integrität","Verfügbarkeit"],
+            default=[]
+        )
         query = st.text_input("Schnellsuche (z.B. 'Server')").strip().lower()
         hier = build_hierarchy(docs, metas)
 
@@ -328,6 +339,13 @@ def main():
                     st.markdown("**Anforderungen:**")
                     for rid, req in sorted(info['anforderungen'].items(), key=lambda x: _requirement_sort_key(x[0])):
                         meta = req['meta']
+                        meta = req['meta']
+                        # Falls Schutzziel-Filter aktiv und die Anforderung keins der gewählten Ziele hat, überspringen
+                        if cia_sel:
+                            if ("Vertraulichkeit" in cia_sel and not meta.get("Vertraulichkeit")) \
+                                    or ("Integrität" in cia_sel and not meta.get("Integrität")) \
+                                    or ("Verfügbarkeit" in cia_sel and not meta.get("Verfügbarkeit")):
+                                continue
                         title = meta.get('Anforderung', rid)
                         if not show_entfallen and "ENTFALLEN" in title:
                             continue
