@@ -11,7 +11,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 
 try:
-    from st_aggrid import AgGrid, GridOptionsBuilder  # optionales Grid
+    from st_aggrid import AgGrid, GridOptionsBuilder
 except ImportError:
     AgGrid = None
 
@@ -30,13 +30,10 @@ def _module_sort_key(mid: str):
     """
     nums = re.findall(r'\d+', mid)
     if len(nums) >= 2:
-        # z.B. ["2","3"] → (2,3)
         return int(nums[0]), int(nums[1])
     elif len(nums) == 1:
-        # z.B. "APP.12" → (12, 0)
         return int(nums[0]), 0
     else:
-        # kein Zahlen­match → ans Ende sortieren
         return float('inf'), float('inf')
 
 
