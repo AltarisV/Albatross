@@ -1,14 +1,13 @@
-import os
-from dotenv import load_dotenv
 import re
-import streamlit as st
-import pandas as pd
 from io import BytesIO
-import torch
 
+import pandas as pd
+import streamlit as st
+import torch
+from dotenv import load_dotenv
 from langchain.embeddings.base import Embeddings
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
 
 try:
     from st_aggrid import AgGrid, GridOptionsBuilder
@@ -30,10 +29,13 @@ def _module_sort_key(mid: str):
     """
     nums = re.findall(r'\d+', mid)
     if len(nums) >= 2:
+        # z.B. ["2","3"] → (2,3)
         return int(nums[0]), int(nums[1])
     elif len(nums) == 1:
+        # z.B. "APP.12" → (12, 0)
         return int(nums[0]), 0
     else:
+        # kein Zahlen­match → ans Ende sortieren
         return float('inf'), float('inf')
 
 
@@ -180,7 +182,7 @@ def get_vectordb(_embeddings):
 
 
 def main():
-    st.set_page_config(page_title='Kompendium Explorer',
+    st.set_page_config(page_title='Kompendium Finder',
                        layout='wide')
 
     st.sidebar.markdown("### Status")
@@ -226,98 +228,63 @@ def main():
         st.sidebar.write("_Keine Anforderungen ausgewählt_")
 
     page = st.sidebar.radio('Navigation', [
-        'Datenbank Explorer',
-        'Semantische Suche',
-        'Drilldown der Bausteine'
+        # 'Datenbank Explorer',
+        'Drilldown der Bausteine',
+        'Semantische Suche'
     ])
 
-    # ─── Datenbank Explorer ───
-    if page == 'Datenbank Explorer':
-        st.header('Datenbank Explorer')
-        st.markdown(f"**Gesamt:** {len(df)} Dokumente in der Vektor-DB")
-        with st.sidebar:
-            st.subheader('Filter')
-            art_sel = st.multiselect('Dokument-Art', sorted(df['Art'].unique()), sorted(df['Art'].unique()))
-            kat_sel = st.multiselect('Bausteinkategorie', sorted(df['Bausteinkategorie'].unique()),
-                                     sorted(df['Bausteinkategorie'].unique()))
-            b_sel = st.multiselect('Baustein', sorted(df['Baustein'].unique()), sorted(df['Baustein'].unique()))
-            katg_sel = st.multiselect('Anforderungskategorie', sorted(df['Anforderungskategorie'].unique()),
-                                      sorted(df['Anforderungskategorie'].unique()))
-            rollen_sel = st.multiselect('Rollen', sorted({r for row in df['Rollen'] for r in row.split(', ') if r}),
-                                        sorted({r for row in df['Rollen'] for r in row.split(', ') if r}))
-            gef_sel = st.multiselect(
-                'Zugeordnete Gefahren',
-                options=sorted(df['Zugeordnete Gefahren'].unique()),
-                default=[]
-            )
-            sort_col = st.selectbox('Sortiere nach',
-                                    ['Bausteinkategorie', 'Baustein', 'Art', 'Anforderungskategorie', 'Titel'], index=0)
-            ascending = st.checkbox('Aufsteigend', True)
+    # # ─── Datenbank Explorer ───
+    # if page == 'Datenbank Explorer':
+    #     st.header('Datenbank Explorer')
+    #     st.markdown(f"**Gesamt:** {len(df)} Dokumente in der Vektor-DB")
+    #     with st.sidebar:
+    #         st.subheader('Filter')
+    #         art_sel = st.multiselect('Dokument-Art', sorted(df['Art'].unique()), sorted(df['Art'].unique()))
+    #         kat_sel = st.multiselect('Bausteinkategorie', sorted(df['Bausteinkategorie'].unique()),
+    #                                  sorted(df['Bausteinkategorie'].unique()))
+    #         b_sel = st.multiselect('Baustein', sorted(df['Baustein'].unique()), sorted(df['Baustein'].unique()))
+    #         katg_sel = st.multiselect('Anforderungskategorie', sorted(df['Anforderungskategorie'].unique()),
+    #                                   sorted(df['Anforderungskategorie'].unique()))
+    #         rollen_sel = st.multiselect('Rollen', sorted({r for row in df['Rollen'] for r in row.split(', ') if r}),
+    #                                     sorted({r for row in df['Rollen'] for r in row.split(', ') if r}))
+    #         gef_sel = st.multiselect(
+    #             'Zugeordnete Gefahren',
+    #             options=sorted(df['Zugeordnete Gefahren'].unique()),
+    #             default=[]
+    #         )
+    #         sort_col = st.selectbox('Sortiere nach',
+    #                                 ['Bausteinkategorie', 'Baustein', 'Art', 'Anforderungskategorie', 'Titel'], index=0)
+    #         ascending = st.checkbox('Aufsteigend', True)
+    #
+    #     mask = (
+    #             df['Art'].isin(art_sel) &
+    #             df['Bausteinkategorie'].isin(kat_sel) &
+    #             df['Baustein'].isin(b_sel) &
+    #             df['Anforderungskategorie'].isin(katg_sel) &
+    #             ((df['Art'] != 'Anforderung') |
+    #              df['Rollen'].apply(lambda rs: any(r in rs for r in rollen_sel))) &
+    #             df['Zugeordnete Gefahren'].apply(lambda s: all(g in s for g in gef_sel))
+    #     )
+    #
+    #     df_filt = df[mask].sort_values(by=sort_col, ascending=ascending).reset_index(drop=True)
+    #
+    #     st.subheader('Gefilterte Dokumente')
+    #
+    #     if AgGrid:
+    #         gb = GridOptionsBuilder.from_dataframe(df_filt)
+    #         gb.configure_default_column(editable=False, wrapText=True, autoHeight=True)
+    #         gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=15)
+    #         grid = AgGrid(df_filt, gridOptions=gb.build(), height=600, fit_columns_on_grid_load=True)
+    #         sel = grid.get('selected_rows') or []
+    #         if sel:
+    #             idx = sel[0]['_selectedRowNodeInfo']['nodeRowIndex']
+    #             st.markdown('---')
+    #             st.subheader('Detail')
+    #             st.write(docs[idx])
+    #     else:
+    #         st.dataframe(df_filt, height=600)
 
-        mask = (
-                df['Art'].isin(art_sel) &
-                df['Bausteinkategorie'].isin(kat_sel) &
-                df['Baustein'].isin(b_sel) &
-                df['Anforderungskategorie'].isin(katg_sel) &
-                ((df['Art'] != 'Anforderung') |
-                 df['Rollen'].apply(lambda rs: any(r in rs for r in rollen_sel))) &
-                df['Zugeordnete Gefahren'].apply(lambda s: all(g in s for g in gef_sel))
-        )
-
-        df_filt = df[mask].sort_values(by=sort_col, ascending=ascending).reset_index(drop=True)
-
-        st.subheader('Gefilterte Dokumente')
-
-        if AgGrid:
-            gb = GridOptionsBuilder.from_dataframe(df_filt)
-            gb.configure_default_column(editable=False, wrapText=True, autoHeight=True)
-            gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=15)
-            grid = AgGrid(df_filt, gridOptions=gb.build(), height=600, fit_columns_on_grid_load=True)
-            sel = grid.get('selected_rows') or []
-            if sel:
-                idx = sel[0]['_selectedRowNodeInfo']['nodeRowIndex']
-                st.markdown('---')
-                st.subheader('Detail')
-                st.write(docs[idx])
-        else:
-            st.dataframe(df_filt, height=600)
-
-    elif page == 'Semantische Suche':
-        st.header('Semantische Suche')
-        only_anf = st.checkbox('Nur nach Anforderungen suchen', value=False)
-        query = st.text_input('Suche / Frage eingeben:')
-        k = st.slider('Anzahl Ergebnisse', 1, 20, 5)
-
-        if query:
-            if only_anf:
-                results = vectordb.max_marginal_relevance_search(
-                    query, k=k, fetch_k=k * 5, lambda_mult=0.7,
-                    filter={"Art": "Anforderung"}
-                )
-            else:
-                results = vectordb.max_marginal_relevance_search(
-                    query, k=k, fetch_k=k * 5, lambda_mult=0.7
-                )
-
-            for i, doc in enumerate(results, 1):
-                meta = doc.metadata
-                header = f"**{i}.** {meta.get('baustein_id', '–')} • {meta.get('Art', '–')}"
-                if meta.get('Anforderung'):
-                    header += f" • {meta['Anforderung']}"
-                elif meta.get('Anforderungsnummer'):
-                    header += f" • {meta['Anforderungsnummer']}"
-                if meta.get('GefahrenID'):
-                    header += f" • {meta['GefahrenID']}"
-                cols = st.columns([0.8, 0.2])
-                cols[0].markdown(header)
-                if cols[1].button("＋", key=f"add_qa_{i}", on_click=add_to_cart,
-                                  args=(meta, [(None, doc.page_content)])):
-                    st.success("Anforderung hinzugefügt", icon="✅")
-                cols[0].write(doc.page_content)
-                cols[0].caption(meta)
-                st.markdown('---')
-
-    else:
+    if page == 'Drilldown der Bausteine':
         st.header('Drilldown der Bausteine')
 
         show_entfallen = st.checkbox(
@@ -327,7 +294,7 @@ def main():
         )
         cia_sel = st.multiselect(
             'Schutzziele filtern',
-            options=["Vertraulichkeit","Integrität","Verfügbarkeit"],
+            options=["Vertraulichkeit", "Integrität", "Verfügbarkeit"],
             default=[]
         )
         query = st.text_input("Schnellsuche (z.B. 'Server')").strip().lower()
@@ -391,6 +358,41 @@ def main():
                                 st.caption(meta)
                                 if meta.get("zugeordnete_gefahren_titel"):
                                     st.markdown(f"**Zugeordnete Gefahren:** {meta['zugeordnete_gefahren_titel']}")
+
+    else:
+        st.header('Semantische Suche')
+        only_anf = st.checkbox('Nur nach Anforderungen suchen', value=False)
+        query = st.text_input('Suche / Frage eingeben:')
+        k = st.slider('Anzahl Ergebnisse', 1, 20, 5)
+
+        if query:
+            if only_anf:
+                results = vectordb.max_marginal_relevance_search(
+                    query, k=k, fetch_k=k * 5, lambda_mult=0.7,
+                    filter={"Art": "Anforderung"}
+                )
+            else:
+                results = vectordb.max_marginal_relevance_search(
+                    query, k=k, fetch_k=k * 5, lambda_mult=0.7
+                )
+
+            for i, doc in enumerate(results, 1):
+                meta = doc.metadata
+                header = f"**{i}.** {meta.get('baustein_id', '–')} • {meta.get('Art', '–')}"
+                if meta.get('Anforderung'):
+                    header += f" • {meta['Anforderung']}"
+                elif meta.get('Anforderungsnummer'):
+                    header += f" • {meta['Anforderungsnummer']}"
+                if meta.get('GefahrenID'):
+                    header += f" • {meta['GefahrenID']}"
+                cols = st.columns([0.8, 0.2])
+                cols[0].markdown(header)
+                if cols[1].button("＋", key=f"add_qa_{i}", on_click=add_to_cart,
+                                  args=(meta, [(None, doc.page_content)])):
+                    st.success("Anforderung hinzugefügt", icon="✅")
+                cols[0].write(doc.page_content)
+                cols[0].caption(meta)
+                st.markdown('---')
 
 
 if __name__ == '__main__':
