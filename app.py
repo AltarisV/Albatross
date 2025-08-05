@@ -1,10 +1,23 @@
+"""
+app.py
+
+Streamlit-Anwendung zur interaktiven Suche und Auswahl von IT-Grundschutz-Daten.
+
+Features:
+  - Drilldown der Bausteine inkl. Filter nach Schutzzielen
+  - Semantische Suche über Vektor-Embedding-Modell
+  - Auswahl und Download der ausgewählten Anforderungen als Excel
+
+Verwendung:
+    streamlit run app.py
+    python -m streamlit run app.py
+"""
 import re
 from io import BytesIO
 
 import pandas as pd
 import streamlit as st
 import torch
-from dotenv import load_dotenv
 from langchain.embeddings.base import Embeddings
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -14,18 +27,29 @@ try:
 except ImportError:
     AgGrid = None
 
-load_dotenv()
-
 
 def _requirement_sort_key(rid: str):
+    """
+    Erzeugt einen Sortierschlüssel aus einer Anforderungs-ID am Ende mit 'A' und Ziffern.
+
+    Args:
+        rid: Anforderungs-ID (z.B. "ABC.1.2.A12").
+    Returns:
+        Integer-Teilschlüssel für das Suffix, oder der Original-String bei Fehlschlag.
+    """
     m = re.search(r"A(\d+)$", rid)
     return int(m.group(1)) if m else rid
 
 
 def _module_sort_key(mid: str):
     """
-    Liefert für IDs wie "APP.2.3" ein Tuple (2,3),
-    für alle anderen Fälle ein sehr großes Tuple, so dass sie ans Ende wandern.
+    Liefert für Modul-IDs wie "APP.2.3" ein Tuple (2, 3) für sortierbare Vergleiche.
+    IDs ohne Zahlen werden ans Ende sortiert.
+
+    Args:
+        mid: Modul-ID-String.
+    Returns:
+        Tuple[int, int] oder (inf, inf) für ungültige IDs.
     """
     nums = re.findall(r'\d+', mid)
     if len(nums) >= 2:
@@ -41,6 +65,15 @@ def _module_sort_key(mid: str):
 
 @st.cache_data(show_spinner=False)
 def load_db(persist_dir: str, _embeddings: Embeddings):
+    """
+    Lädt alle Dokumente und zugehörige Metadaten aus einer Chroma-Vector-Datenbank.
+
+    Args:
+        persist_dir: Verzeichnis mit persistierten Vektordaten.
+        _embeddings: Embedding-Funktion für die Datenbankinstanz.
+    Returns:
+        Tuple[List[str], List[dict]]: Dokumenttexte und Metadaten.
+    """
     vectordb = Chroma(persist_directory=persist_dir, embedding_function=_embeddings)
     col = vectordb._collection
     data = col.get(limit=col.count())
@@ -48,6 +81,15 @@ def load_db(persist_dir: str, _embeddings: Embeddings):
 
 
 def load_db_entries(persist_dir: str, embeddings: Embeddings):
+    """
+    Erstellt ein pandas DataFrame aus den geladenen DB-Einträgen für Streamlit-Tabellen.
+
+    Args:
+        persist_dir: Verzeichnis der Vektor-Datenbank.
+        embeddings: Embedding-Instanz (wird an load_db weitergereicht).
+    Returns:
+        Tuple[pd.DataFrame, List[str], List[dict]]: Tabelle, Dokumenttexte, Metadaten.
+    """
     docs, metas = load_db(persist_dir, embeddings)
     rows = []
     for idx, (text, meta) in enumerate(zip(docs, metas)):
@@ -91,6 +133,15 @@ def load_db_entries(persist_dir: str, embeddings: Embeddings):
 
 @st.cache_data(show_spinner=False)
 def build_hierarchy(docs, metas):
+    """
+    Gruppiert Dokumente hierarchisch nach Bausteinkategorie und -ID.
+
+    Args:
+        docs: Liste der Dokumenten-Strings.
+        metas: Liste der zugehörigen Metadaten.
+    Returns:
+        Dict: {Kategorie: {Baustein: {"baustein_docs": [...], "anforderungen": {...}}}}
+    """
     hier = {}
     for idx, (doc, meta) in enumerate(zip(docs, metas)):
         kat = meta.get('bausteinkategorie_id', 'UNKNOWN')
@@ -108,6 +159,14 @@ def build_hierarchy(docs, metas):
 
 
 def build_excel(requirements):
+    """
+    Generiert eine Excel-Datei für die ausgewählten Anforderungen.
+
+    Args:
+        requirements: Liste von Dicts mit 'meta' und 'chunks'.
+    Returns:
+        BytesIO-Puffer mit der Excel-Arbeitsmappe.
+    """
     rows = []
     for req in requirements:
         meta = req['meta']
@@ -142,6 +201,15 @@ def build_excel(requirements):
 
 
 def module_matches(info, query):
+    """
+    Prüft, ob die Suchanfrage in Modul-Titel, Beschreibung oder Anforderungen vorkommt.
+
+    Args:
+        info: Dict mit 'baustein_docs' und 'anforderungen'.
+        query: Suchbegriff in Kleinbuchstaben.
+    Returns:
+        bool: True bei Treffer, sonst False.
+    """
     _, desc, meta = info['baustein_docs'][0]
     if query in meta.get('baustein_titel', '').lower():
         return True
@@ -158,6 +226,13 @@ def module_matches(info, query):
 
 
 def add_to_cart(meta, chunks):
+    """
+    Fügt eine Anforderung dem Session-State-Warenkorb hinzu, falls noch nicht vorhanden.
+
+    Args:
+        meta: Metadaten der Anforderung.
+        chunks: Liste von Textabschnitten der Anforderung.
+    """
     entry = {'meta': meta, 'chunks': chunks}
     if entry not in st.session_state.cart:
         st.session_state.cart.append(entry)
@@ -165,6 +240,12 @@ def add_to_cart(meta, chunks):
 
 @st.cache_resource(show_spinner=False)
 def get_embeddings():
+    """
+    Initialisiert und cached das HuggingFace-Embedding-Modell BAAI/bge-m3.
+
+    Returns:
+        Instanz von HuggingFaceEmbeddings.
+    """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     return HuggingFaceEmbeddings(
         model_name="BAAI/bge-m3",
@@ -175,6 +256,14 @@ def get_embeddings():
 
 @st.cache_resource(show_spinner=False)
 def get_vectordb(_embeddings):
+    """
+    Lädt und cached die lokale Chroma-Vektor-Datenbank.
+
+    Args:
+        _embeddings: Embedding-Funktion für die Datenbank.
+    Returns:
+        Chroma-Instanz.
+    """
     return Chroma(
         persist_directory='db',
         embedding_function=_embeddings
@@ -182,6 +271,10 @@ def get_vectordb(_embeddings):
 
 
 def main():
+    """
+    Startet die Streamlit-App, richtet Layout und Navigation ein,
+    lädt Modell und Datenbank und steuert Seitenlogik.
+    """
     st.set_page_config(page_title='Kompendium Finder',
                        layout='wide')
 

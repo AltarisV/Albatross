@@ -13,15 +13,13 @@ Anschließend kann es:
 
 Usage:
     python ingest.py <xml_path> [--mode json|vectordb] [--output OUTPUT]
-    z.B. python ingest.py resources/grundschutz_2023.xml --mode vectordb
 """
-
 import os
 import argparse
 import json
 import re
 import xml.etree.ElementTree as ET
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 import torch
 
 import pandas as pd
@@ -76,22 +74,14 @@ def _find_subsection(parent: ET.Element, title: str) -> Optional[ET.Element]:
     return None
 
 
-def load_excel_mapping(excel_path: str) -> Tuple[Dict[str, List[str]], Dict[str, str]]:
+def load_excel_mapping(excel_path: str) -> (Dict[str, List[str]], Dict[str, str]):
     """
-    Liest alle Sheets der Excel-Datei ein und erstellt zwei Mappings:
-
-      1. mapping: Requirement-ID → Liste von Gefahren-IDs
-      2. cia_map:  Requirement-ID → dazugehörige Schutzziele (String mit C, I, A)
-
-    Args:
-        excel_path: Pfad zur Excel-Datei.
-    Returns:
-        Tuple aus (mapping, cia_map).
+    Liest alle Sheets der Excel-Datei ein und erstellt ein Dict:
+      { Anforderungs-ID: [Gefahren-ID, …], … }
     """
     mapping: Dict[str, List[str]] = {}
     cia_map: Dict[str, str] = {}
     sheets = pd.read_excel(excel_path, sheet_name=None)
-
     for df in sheets.values():
         # Erste Spalte: Anforderungs-IDs
         req_ids = df.iloc[:, 0].fillna("").astype(str)
@@ -102,7 +92,6 @@ def load_excel_mapping(excel_path: str) -> Tuple[Dict[str, List[str]], Dict[str,
         if 'CIA' not in df.columns:
             continue
         cia_vals = df['CIA'].fillna("").astype(str)
-
         for idx, rid in enumerate(req_ids):
             if not rid.strip():
                 continue
@@ -111,7 +100,6 @@ def load_excel_mapping(excel_path: str) -> Tuple[Dict[str, List[str]], Dict[str,
             zugeordnete = [col for col, mark in zip(threat_cols, row_flags) if str(mark).strip()]
             mapping[rid] = zugeordnete
             cia_map[rid] = cia_vals.iloc[idx].strip()
-
     return mapping, cia_map
 
 
@@ -134,7 +122,7 @@ def load_threat_titles(xml_path: str) -> Dict[str, str]:
         if ct is not None and ct.text and ct.text.strip() == "Elementare Gefährdungen":
             for sec in chap.findall("db:section", NS):
                 t = sec.find("db:title", NS)
-                if not t or not t.text:
+                if t is None or not t.text:
                     continue
                 raw = t.text.strip()
                 parts = raw.split(maxsplit=2)
@@ -143,7 +131,6 @@ def load_threat_titles(xml_path: str) -> Dict[str, str]:
                     titel = raw[len(gid):].strip()
                     titles[gid] = titel
             break
-
     return titles
 
 
@@ -174,14 +161,14 @@ def extract_structure(
 
     for chap in root.findall("db:chapter", NS):
         ct = chap.find("db:title", NS)
-        if not ct or not ct.text:
+        if ct is None or not ct.text:
             continue
         title = ct.text.strip()
         # Nur Kapitel, die mit Buchstaben-ID beginnen
         if not CHAPTER_RE.match(title):
             continue
         chap_id = title.split()[0]
-        kat: Dict[str, Any] = {
+        kat = {
             "bausteinkategorie_id": chap_id,
             "bausteinkategorie_titel": title,
             "bausteine": []
@@ -189,7 +176,7 @@ def extract_structure(
 
         for mod in chap.findall("db:section", NS):
             mt = mod.find("db:title", NS)
-            if not mt or not mt.text:
+            if mt is None or not mt.text:
                 continue
             raw = mt.text.strip()
             m = MODULE_RE.match(raw)
@@ -215,7 +202,7 @@ def extract_structure(
             if th_sec:
                 for tsec in th_sec.findall("db:section", NS):
                     tt = tsec.find("db:title", NS)
-                    if not tt or not tt.text:
+                    if tt is None or not tt.text:
                         continue
                     threats.append({
                         "gefahren_id": tt.text.strip(),
@@ -228,7 +215,7 @@ def extract_structure(
             if req_root:
                 for r in req_root.findall(".//db:section", NS):
                     r_title = r.find("db:title", NS)
-                    if not r_title or not r_title.text:
+                    if r_title is None or not r_title.text:
                         continue
                     full = r_title.text.strip()
                     if not REQ_RE.match(full):
@@ -238,11 +225,11 @@ def extract_structure(
                     lvl_m = re.search(r"\((B|S|H)\)", full)
                     katg = lvl_m.group(1) if lvl_m else "?"
                     roles_m = re.search(r"\[(.+?)\]", full)
-                    rollen = roles_m.group(1).split(",") if roles_m else []
-                    rollen = [x.strip() for x in rollen]
+                    rollen = [x.strip() for x in roles_m.group(1).split(",")] if roles_m else []
 
                     zugeordnete = gefahr_map.get(rid, [])
                     titel_list = [gefahr_titel.get(g, g) for g in zugeordnete]
+                    # CIA-Rohwert in drei bools aufteilen
                     raw_cia = cia_map.get(rid, "")
                     vertraulichkeit = "C" in raw_cia
                     integritaet = "I" in raw_cia
@@ -298,7 +285,11 @@ def modules_to_documents(bausteinkategorien: List[Dict[str, Any]]) -> List[Docum
             "bausteinkategorie_titel": kat["bausteinkategorie_titel"],
         }
         for b in kat["bausteine"]:
-            base_meta = {**base_kat_meta, "baustein_id": b["baustein_id"], "baustein_titel": b["baustein_titel"]}
+            base_meta = {
+                **base_kat_meta,
+                "baustein_id": b["baustein_id"],
+                "baustein_titel": b["baustein_titel"],
+            }
 
             # Haupttext
             full_text = "\n\n".join([
@@ -314,7 +305,12 @@ def modules_to_documents(bausteinkategorien: List[Dict[str, Any]]) -> List[Docum
             for thr in b["threats"]:
                 thr_text = f"{thr['gefahren_id']}\n\n{thr['text']}"
                 for i, chunk in enumerate(splitter.split_text(thr_text)):
-                    meta = {**base_meta, "Art": "Gefahrenlage", "GefahrenID": thr['gefahren_id'], "chunk_index": i}
+                    meta = {
+                        **base_meta,
+                        "Art": "Gefahrenlage",
+                        "GefahrenID": thr["gefahren_id"],
+                        "chunk_index": i
+                    }
                     docs.append(Document(page_content=chunk, metadata=meta))
 
             # Anforderungen
@@ -347,9 +343,8 @@ def main():
     """
     parser = argparse.ArgumentParser(description="IT-Grundschutz XML → JSON oder VectorDB")
     parser.add_argument("xml", help="Pfad zur XML-Datei")
-    parser.add_argument("--mode", choices=["json", "vectordb"], default="json",
-                        help="Ausgabe-Modus: 'json' oder 'vectordb'")
-    parser.add_argument("--output", help="Ziel-Datei (JSON) oder DB-Verzeichnis (vectordb)")
+    parser.add_argument("--mode", choices=["json", "vectordb"], default="json")
+    parser.add_argument("--output", help="JSON-Datei (json) oder DB-Verzeichnis (vectordb)")
     args = parser.parse_args()
 
     xml_path = args.xml
@@ -362,7 +357,7 @@ def main():
     # Struktur extrahieren
     bausteinkategorien = extract_structure(xml_path, gefahr_map, gefahr_titel, cia_map)
     bc = sum(len(k["bausteine"]) for k in bausteinkategorien)
-    rc = sum(len(b["requirements"]) for k in bausteinkategorien for b in k["bausteine"] )
+    rc = sum(len(b["requirements"]) for k in bausteinkategorien for b in k["bausteine"])
 
     if args.mode == "json":
         os.makedirs(os.path.dirname(out), exist_ok=True)
@@ -370,7 +365,6 @@ def main():
             json.dump(bausteinkategorien, f, indent=2, ensure_ascii=False)
         print(f"✅ JSON: {bc} Bausteine, {rc} Anforderungen → {out}")
     else:
-        # Wähle Device für Embeddings
         device = "cuda" if torch.cuda.is_available() else "cpu"
         embeddings = HuggingFaceEmbeddings(
             model_name="BAAI/bge-m3",
