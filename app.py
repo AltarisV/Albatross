@@ -1,45 +1,79 @@
-import os
-from dotenv import load_dotenv
-import re
-import streamlit as st
-import pandas as pd
-from io import BytesIO
-import torch
+"""
+app.py
 
+Streamlit-Anwendung zur interaktiven Suche und Auswahl von IT-Grundschutz-Daten.
+
+Features:
+  - Drilldown der Bausteine inkl. Filter nach Schutzzielen
+  - Semantische Suche über Vektor-Embedding-Modell
+  - Auswahl und Download der ausgewählten Anforderungen als Excel
+
+Verwendung:
+    streamlit run app.py
+    python -m streamlit run app.py
+"""
+import re
+from io import BytesIO
+
+import pandas as pd
+import streamlit as st
+import torch
 from langchain.embeddings.base import Embeddings
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
 
 try:
     from st_aggrid import AgGrid, GridOptionsBuilder
 except ImportError:
     AgGrid = None
 
-# Nur notwendig bei OpenAI-Embeddings
-# load_dotenv()
-
 
 def _requirement_sort_key(rid: str):
+    """
+    Erzeugt einen Sortierschlüssel aus einer Anforderungs-ID am Ende mit 'A' und Ziffern.
+
+    Args:
+        rid: Anforderungs-ID (z.B. "ABC.1.2.A12").
+    Returns:
+        Integer-Teilschlüssel für das Suffix, oder der Original-String bei Fehlschlag.
+    """
     m = re.search(r"A(\d+)$", rid)
     return int(m.group(1)) if m else rid
 
 
 def _module_sort_key(mid: str):
     """
-    Liefert für IDs wie "APP.2.3" ein Tuple (2,3),
-    für alle anderen Fälle ein sehr großes Tuple, so dass sie ans Ende wandern.
+    Liefert für Modul-IDs wie "APP.2.3" ein Tuple (2, 3) für sortierbare Vergleiche.
+    IDs ohne Zahlen werden ans Ende sortiert.
+
+    Args:
+        mid: Modul-ID-String.
+    Returns:
+        Tuple[int, int] oder (inf, inf) für ungültige IDs.
     """
     nums = re.findall(r'\d+', mid)
     if len(nums) >= 2:
+        # z.B. ["2","3"] → (2,3)
         return int(nums[0]), int(nums[1])
     elif len(nums) == 1:
+        # z.B. "APP.12" → (12, 0)
         return int(nums[0]), 0
     else:
+        # kein Zahlen­match → ans Ende sortieren
         return float('inf'), float('inf')
 
 
 @st.cache_data(show_spinner=False)
 def load_db(persist_dir: str, _embeddings: Embeddings):
+    """
+    Lädt alle Dokumente und zugehörige Metadaten aus einer Chroma-Vector-Datenbank.
+
+    Args:
+        persist_dir: Verzeichnis mit persistierten Vektordaten.
+        _embeddings: Embedding-Funktion für die Datenbankinstanz.
+    Returns:
+        Tuple[List[str], List[dict]]: Dokumenttexte und Metadaten.
+    """
     vectordb = Chroma(persist_directory=persist_dir, embedding_function=_embeddings)
     col = vectordb._collection
     data = col.get(limit=col.count())
@@ -47,6 +81,15 @@ def load_db(persist_dir: str, _embeddings: Embeddings):
 
 
 def load_db_entries(persist_dir: str, embeddings: Embeddings):
+    """
+    Erstellt ein pandas DataFrame aus den geladenen DB-Einträgen für Streamlit-Tabellen.
+
+    Args:
+        persist_dir: Verzeichnis der Vektor-Datenbank.
+        embeddings: Embedding-Instanz (wird an load_db weitergereicht).
+    Returns:
+        Tuple[pd.DataFrame, List[str], List[dict]]: Tabelle, Dokumenttexte, Metadaten.
+    """
     docs, metas = load_db(persist_dir, embeddings)
     rows = []
     for idx, (text, meta) in enumerate(zip(docs, metas)):
@@ -90,6 +133,15 @@ def load_db_entries(persist_dir: str, embeddings: Embeddings):
 
 @st.cache_data(show_spinner=False)
 def build_hierarchy(docs, metas):
+    """
+    Gruppiert Dokumente hierarchisch nach Bausteinkategorie und -ID.
+
+    Args:
+        docs: Liste der Dokumenten-Strings.
+        metas: Liste der zugehörigen Metadaten.
+    Returns:
+        Dict: {Kategorie: {Baustein: {"baustein_docs": [...], "anforderungen": {...}}}}
+    """
     hier = {}
     for idx, (doc, meta) in enumerate(zip(docs, metas)):
         kat = meta.get('bausteinkategorie_id', 'UNKNOWN')
@@ -107,6 +159,14 @@ def build_hierarchy(docs, metas):
 
 
 def build_excel(requirements):
+    """
+    Generiert eine Excel-Datei für die ausgewählten Anforderungen.
+
+    Args:
+        requirements: Liste von Dicts mit 'meta' und 'chunks'.
+    Returns:
+        BytesIO-Puffer mit der Excel-Arbeitsmappe.
+    """
     rows = []
     for req in requirements:
         meta = req['meta']
@@ -141,6 +201,15 @@ def build_excel(requirements):
 
 
 def module_matches(info, query):
+    """
+    Prüft, ob die Suchanfrage in Modul-Titel, Beschreibung oder Anforderungen vorkommt.
+
+    Args:
+        info: Dict mit 'baustein_docs' und 'anforderungen'.
+        query: Suchbegriff in Kleinbuchstaben.
+    Returns:
+        bool: True bei Treffer, sonst False.
+    """
     _, desc, meta = info['baustein_docs'][0]
     if query in meta.get('baustein_titel', '').lower():
         return True
@@ -157,6 +226,13 @@ def module_matches(info, query):
 
 
 def add_to_cart(meta, chunks):
+    """
+    Fügt eine Anforderung dem Session-State-Warenkorb hinzu, falls noch nicht vorhanden.
+
+    Args:
+        meta: Metadaten der Anforderung.
+        chunks: Liste von Textabschnitten der Anforderung.
+    """
     entry = {'meta': meta, 'chunks': chunks}
     if entry not in st.session_state.cart:
         st.session_state.cart.append(entry)
@@ -164,6 +240,12 @@ def add_to_cart(meta, chunks):
 
 @st.cache_resource(show_spinner=False)
 def get_embeddings():
+    """
+    Initialisiert und cached das HuggingFace-Embedding-Modell BAAI/bge-m3.
+
+    Returns:
+        Instanz von HuggingFaceEmbeddings.
+    """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     return HuggingFaceEmbeddings(
         model_name="BAAI/bge-m3",
@@ -174,6 +256,14 @@ def get_embeddings():
 
 @st.cache_resource(show_spinner=False)
 def get_vectordb(_embeddings):
+    """
+    Lädt und cached die lokale Chroma-Vektor-Datenbank.
+
+    Args:
+        _embeddings: Embedding-Funktion für die Datenbank.
+    Returns:
+        Chroma-Instanz.
+    """
     return Chroma(
         persist_directory='db',
         embedding_function=_embeddings
@@ -181,7 +271,11 @@ def get_vectordb(_embeddings):
 
 
 def main():
-    st.set_page_config(page_title='Kompendium Explorer',
+    """
+    Startet die Streamlit-App, richtet Layout und Navigation ein,
+    lädt Modell und Datenbank und steuert Seitenlogik.
+    """
+    st.set_page_config(page_title='Kompendium Finder',
                        layout='wide')
 
     st.sidebar.markdown("### Status")
@@ -227,98 +321,63 @@ def main():
         st.sidebar.write("_Keine Anforderungen ausgewählt_")
 
     page = st.sidebar.radio('Navigation', [
-        'Datenbank Explorer',
-        'Semantische Suche',
-        'Drilldown der Bausteine'
+        # 'Datenbank Explorer',
+        'Drilldown der Bausteine',
+        'Semantische Suche'
     ])
 
-    # ─── Datenbank Explorer ───
-    if page == 'Datenbank Explorer':
-        st.header('Datenbank Explorer')
-        st.markdown(f"**Gesamt:** {len(df)} Dokumente in der Vektor-DB")
-        with st.sidebar:
-            st.subheader('Filter')
-            art_sel = st.multiselect('Dokument-Art', sorted(df['Art'].unique()), sorted(df['Art'].unique()))
-            kat_sel = st.multiselect('Bausteinkategorie', sorted(df['Bausteinkategorie'].unique()),
-                                     sorted(df['Bausteinkategorie'].unique()))
-            b_sel = st.multiselect('Baustein', sorted(df['Baustein'].unique()), sorted(df['Baustein'].unique()))
-            katg_sel = st.multiselect('Anforderungskategorie', sorted(df['Anforderungskategorie'].unique()),
-                                      sorted(df['Anforderungskategorie'].unique()))
-            rollen_sel = st.multiselect('Rollen', sorted({r for row in df['Rollen'] for r in row.split(', ') if r}),
-                                        sorted({r for row in df['Rollen'] for r in row.split(', ') if r}))
-            gef_sel = st.multiselect(
-                'Zugeordnete Gefahren',
-                options=sorted(df['Zugeordnete Gefahren'].unique()),
-                default=[]
-            )
-            sort_col = st.selectbox('Sortiere nach',
-                                    ['Bausteinkategorie', 'Baustein', 'Art', 'Anforderungskategorie', 'Titel'], index=0)
-            ascending = st.checkbox('Aufsteigend', True)
+    # # ─── Datenbank Explorer ───
+    # if page == 'Datenbank Explorer':
+    #     st.header('Datenbank Explorer')
+    #     st.markdown(f"**Gesamt:** {len(df)} Dokumente in der Vektor-DB")
+    #     with st.sidebar:
+    #         st.subheader('Filter')
+    #         art_sel = st.multiselect('Dokument-Art', sorted(df['Art'].unique()), sorted(df['Art'].unique()))
+    #         kat_sel = st.multiselect('Bausteinkategorie', sorted(df['Bausteinkategorie'].unique()),
+    #                                  sorted(df['Bausteinkategorie'].unique()))
+    #         b_sel = st.multiselect('Baustein', sorted(df['Baustein'].unique()), sorted(df['Baustein'].unique()))
+    #         katg_sel = st.multiselect('Anforderungskategorie', sorted(df['Anforderungskategorie'].unique()),
+    #                                   sorted(df['Anforderungskategorie'].unique()))
+    #         rollen_sel = st.multiselect('Rollen', sorted({r for row in df['Rollen'] for r in row.split(', ') if r}),
+    #                                     sorted({r for row in df['Rollen'] for r in row.split(', ') if r}))
+    #         gef_sel = st.multiselect(
+    #             'Zugeordnete Gefahren',
+    #             options=sorted(df['Zugeordnete Gefahren'].unique()),
+    #             default=[]
+    #         )
+    #         sort_col = st.selectbox('Sortiere nach',
+    #                                 ['Bausteinkategorie', 'Baustein', 'Art', 'Anforderungskategorie', 'Titel'], index=0)
+    #         ascending = st.checkbox('Aufsteigend', True)
+    #
+    #     mask = (
+    #             df['Art'].isin(art_sel) &
+    #             df['Bausteinkategorie'].isin(kat_sel) &
+    #             df['Baustein'].isin(b_sel) &
+    #             df['Anforderungskategorie'].isin(katg_sel) &
+    #             ((df['Art'] != 'Anforderung') |
+    #              df['Rollen'].apply(lambda rs: any(r in rs for r in rollen_sel))) &
+    #             df['Zugeordnete Gefahren'].apply(lambda s: all(g in s for g in gef_sel))
+    #     )
+    #
+    #     df_filt = df[mask].sort_values(by=sort_col, ascending=ascending).reset_index(drop=True)
+    #
+    #     st.subheader('Gefilterte Dokumente')
+    #
+    #     if AgGrid:
+    #         gb = GridOptionsBuilder.from_dataframe(df_filt)
+    #         gb.configure_default_column(editable=False, wrapText=True, autoHeight=True)
+    #         gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=15)
+    #         grid = AgGrid(df_filt, gridOptions=gb.build(), height=600, fit_columns_on_grid_load=True)
+    #         sel = grid.get('selected_rows') or []
+    #         if sel:
+    #             idx = sel[0]['_selectedRowNodeInfo']['nodeRowIndex']
+    #             st.markdown('---')
+    #             st.subheader('Detail')
+    #             st.write(docs[idx])
+    #     else:
+    #         st.dataframe(df_filt, height=600)
 
-        mask = (
-                df['Art'].isin(art_sel) &
-                df['Bausteinkategorie'].isin(kat_sel) &
-                df['Baustein'].isin(b_sel) &
-                df['Anforderungskategorie'].isin(katg_sel) &
-                ((df['Art'] != 'Anforderung') |
-                 df['Rollen'].apply(lambda rs: any(r in rs for r in rollen_sel))) &
-                df['Zugeordnete Gefahren'].apply(lambda s: all(g in s for g in gef_sel))
-        )
-
-        df_filt = df[mask].sort_values(by=sort_col, ascending=ascending).reset_index(drop=True)
-
-        st.subheader('Gefilterte Dokumente')
-
-        if AgGrid:
-            gb = GridOptionsBuilder.from_dataframe(df_filt)
-            gb.configure_default_column(editable=False, wrapText=True, autoHeight=True)
-            gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=15)
-            grid = AgGrid(df_filt, gridOptions=gb.build(), height=600, fit_columns_on_grid_load=True)
-            sel = grid.get('selected_rows') or []
-            if sel:
-                idx = sel[0]['_selectedRowNodeInfo']['nodeRowIndex']
-                st.markdown('---')
-                st.subheader('Detail')
-                st.write(docs[idx])
-        else:
-            st.dataframe(df_filt, height=600)
-
-    elif page == 'Semantische Suche':
-        st.header('Semantische Suche')
-        only_anf = st.checkbox('Nur nach Anforderungen suchen', value=False)
-        query = st.text_input('Suche / Frage eingeben:')
-        k = st.slider('Anzahl Ergebnisse', 1, 20, 5)
-
-        if query:
-            if only_anf:
-                results = vectordb.max_marginal_relevance_search(
-                    query, k=k, fetch_k=k * 5, lambda_mult=0.7,
-                    filter={"Art": "Anforderung"}
-                )
-            else:
-                results = vectordb.max_marginal_relevance_search(
-                    query, k=k, fetch_k=k * 5, lambda_mult=0.7
-                )
-
-            for i, doc in enumerate(results, 1):
-                meta = doc.metadata
-                header = f"**{i}.** {meta.get('baustein_id', '–')} • {meta.get('Art', '–')}"
-                if meta.get('Anforderung'):
-                    header += f" • {meta['Anforderung']}"
-                elif meta.get('Anforderungsnummer'):
-                    header += f" • {meta['Anforderungsnummer']}"
-                if meta.get('GefahrenID'):
-                    header += f" • {meta['GefahrenID']}"
-                cols = st.columns([0.8, 0.2])
-                cols[0].markdown(header)
-                if cols[1].button("＋", key=f"add_qa_{i}", on_click=add_to_cart,
-                                  args=(meta, [(None, doc.page_content)])):
-                    st.success("Anforderung hinzugefügt", icon="✅")
-                cols[0].write(doc.page_content)
-                cols[0].caption(meta)
-                st.markdown('---')
-
-    else:
+    if page == 'Drilldown der Bausteine':
         st.header('Drilldown der Bausteine')
 
         show_entfallen = st.checkbox(
@@ -328,7 +387,7 @@ def main():
         )
         cia_sel = st.multiselect(
             'Schutzziele filtern',
-            options=["Vertraulichkeit","Integrität","Verfügbarkeit"],
+            options=["Vertraulichkeit", "Integrität", "Verfügbarkeit"],
             default=[]
         )
         query = st.text_input("Schnellsuche (z.B. 'Server')").strip().lower()
@@ -392,6 +451,41 @@ def main():
                                 st.caption(meta)
                                 if meta.get("zugeordnete_gefahren_titel"):
                                     st.markdown(f"**Zugeordnete Gefahren:** {meta['zugeordnete_gefahren_titel']}")
+
+    else:
+        st.header('Semantische Suche')
+        only_anf = st.checkbox('Nur nach Anforderungen suchen', value=False)
+        query = st.text_input('Suche / Frage eingeben:')
+        k = st.slider('Anzahl Ergebnisse', 1, 20, 5)
+
+        if query:
+            if only_anf:
+                results = vectordb.max_marginal_relevance_search(
+                    query, k=k, fetch_k=k * 5, lambda_mult=0.7,
+                    filter={"Art": "Anforderung"}
+                )
+            else:
+                results = vectordb.max_marginal_relevance_search(
+                    query, k=k, fetch_k=k * 5, lambda_mult=0.7
+                )
+
+            for i, doc in enumerate(results, 1):
+                meta = doc.metadata
+                header = f"**{i}.** {meta.get('baustein_id', '–')} • {meta.get('Art', '–')}"
+                if meta.get('Anforderung'):
+                    header += f" • {meta['Anforderung']}"
+                elif meta.get('Anforderungsnummer'):
+                    header += f" • {meta['Anforderungsnummer']}"
+                if meta.get('GefahrenID'):
+                    header += f" • {meta['GefahrenID']}"
+                cols = st.columns([0.8, 0.2])
+                cols[0].markdown(header)
+                if cols[1].button("＋", key=f"add_qa_{i}", on_click=add_to_cart,
+                                  args=(meta, [(None, doc.page_content)])):
+                    st.success("Anforderung hinzugefügt", icon="✅")
+                cols[0].write(doc.page_content)
+                cols[0].caption(meta)
+                st.markdown('---')
 
 
 if __name__ == '__main__':

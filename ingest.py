@@ -1,3 +1,19 @@
+"""
+ingest.py
+
+Skript zur Verarbeitung von IT-Grundschutz-Daten.
+
+Dieses Modul liest:
+  - eine XML-Datei mit Baustein- und Anforderungsstruktur
+  - eine Excel-Datei mit Zuordnungen von Anforderungen zu Gefahren und CIA-Kategorien
+
+Anschließend kann es:
+  - das Ergebnis als JSON-Datei speichern
+  - oder in eine Chroma-Vector-Datenbank schreiben
+
+Usage:
+    python ingest.py <xml_path> [--mode json|vectordb] [--output OUTPUT]
+"""
 import os
 import argparse
 import json
@@ -7,30 +23,50 @@ from typing import List, Dict, Any, Optional
 import torch
 
 import pandas as pd
-from dotenv import load_dotenv
 from langchain.schema import Document
 
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
-# Nur notwendig bei OpenAI-Embeddings
-# load_dotenv()
 
+# Regex für Requirement-IDs im Format "ABC.1.2.A3"
 REQ_RE = re.compile(r"^[A-Z]+(?:\.\d+)+\.A\d+\b")
+# Regex zur Erkennung von Modul-IDs und -Titeln: "ABC.1.2  Titel"
 MODULE_RE = re.compile(r"^([A-Z]+(?:\.\d+)+)\s+")
+# Kapitel-IDs im XML sind Kurzbezeichnungen aus 2–5 Buchstaben
 CHAPTER_RE = re.compile(r"^[A-Z]{2,5}\b")
+# XML-Namespace für DocBook-Elemente
 NS = {"db": "http://docbook.org/ns/docbook"}
 
+# Pfad zur Excel-Datei mit Zuordnungen (Mapping Requirement → Gefahren, CIA)
 EXCEL_MAP_FILE = "resources/krt2023_Excel.xlsx"
 
 
 def _text_from_paras(el: ET.Element) -> str:
+    """
+    Extrahiert alle <para>-Texte aus einem XML-Element und
+    gibt sie als durch Leerzeilen getrennten String zurück.
+
+    Args:
+        el: XML-Element, in dem nach <db:para> gesucht wird.
+    Returns:
+        Zusammengesetzter Text aller Absatz-Elemente.
+    """
     paras = ["".join(p.itertext()).strip() for p in el.findall(".//db:para", NS)]
     return "\n\n".join(filter(None, paras))
 
 
 def _find_subsection(parent: ET.Element, title: str) -> Optional[ET.Element]:
+    """
+    Sucht untergeordnete <section>-Elemente mit einem bestimmten <title>.
+
+    Args:
+        parent: XML-Element, unter dem gesucht wird.
+        title: Zu suchender Titel-Text.
+    Returns:
+        Erstes gefundenes <section>-Element oder None.
+    """
     for sec in parent.findall("db:section", NS):
         t = sec.find("db:title", NS)
         if t is not None and t.text and t.text.strip() == title:
@@ -47,18 +83,21 @@ def load_excel_mapping(excel_path: str) -> (Dict[str, List[str]], Dict[str, str]
     cia_map: Dict[str, str] = {}
     sheets = pd.read_excel(excel_path, sheet_name=None)
     for df in sheets.values():
+        # Erste Spalte: Anforderungs-IDs
         req_ids = df.iloc[:, 0].fillna("").astype(str)
+        # Spalten ab Index 3: Gefahren-Kennzeichen-Matrix
         threat_cols = df.columns[3:]
         flag_matrix = df.iloc[:, 3:].fillna("")
-        # Spalte CIA (Index 2) holen
+        # Spalte 'CIA' an Index 2 für Vertraulichkeits-/Integritäts-/Verfügbarkeitswerte
         if 'CIA' not in df.columns:
             continue
         cia_vals = df['CIA'].fillna("").astype(str)
         for idx, rid in enumerate(req_ids):
             if not rid.strip():
                 continue
-            vals = flag_matrix.iloc[idx]
-            zugeordnete = [col for col, mark in zip(threat_cols, vals) if str(mark).strip()]
+            row_flags = flag_matrix.iloc[idx]
+            # Gefahren-IDs, bei denen ein nicht-leerer Eintrag steht
+            zugeordnete = [col for col, mark in zip(threat_cols, row_flags) if str(mark).strip()]
             mapping[rid] = zugeordnete
             cia_map[rid] = cia_vals.iloc[idx].strip()
     return mapping, cia_map
@@ -66,11 +105,18 @@ def load_excel_mapping(excel_path: str) -> (Dict[str, List[str]], Dict[str, str]
 
 def load_threat_titles(xml_path: str) -> Dict[str, str]:
     """
-    Extrahiert aus dem Kapitel "Elementare Gefährdungen" alle IDs ("G 0.x") und Titel.
+    Extrahiert aus dem Kapitel "Elementare Gefährdungen" alle Gefahren-IDs und Titel.
+
+    Args:
+        xml_path: Pfad zur XML-Datei im DocBook-Format.
+    Returns:
+        Dict: Gefahren-ID (z.B. 'G 1.1') → Gefahren-Titel.
     """
     tree = ET.parse(xml_path)
     root = tree.getroot()
     titles: Dict[str, str] = {}
+
+    # Suche nach dem Kapitel 'Elementare Gefährdungen'
     for chap in root.findall("db:chapter", NS):
         ct = chap.find("db:title", NS)
         if ct is not None and ct.text and ct.text.strip() == "Elementare Gefährdungen":
@@ -95,10 +141,19 @@ def extract_structure(
         cia_map: Dict[str, str]
 ) -> List[Dict[str, Any]]:
     """
-    Lädt das XML, splittert Text, extrahiert Bausteine und Anforderungen
+    Lädt das XML, splittet Text, extrahiert Bausteine und Anforderungen
     und ergänzt für jede Anforderung:
-      - zugeordnete_gefahren (Liste von G-IDs)
-      - zugeordnete_gefahren_titel (Liste von Titeln)
+      - zugeordnete_gefahren
+      - zugeordnete_gefahren_titel
+      - CIA-Bools für Vertraulichkeit, Integrität, Verfügbarkeit
+
+    Args:
+        xml_path: Pfad zur XML-Datei.
+        gefahr_map: Mapping Requirement-ID → Liste von Gefahren-IDs.
+        gefahr_titel: Mapping Gefahren-ID → Titel.
+        cia_map: Mapping Requirement-ID → CIA-Rohwert.
+    Returns:
+        Liste von Bausteinkategorien mit allen Metadaten.
     """
     tree = ET.parse(xml_path)
     root = tree.getroot()
@@ -109,6 +164,7 @@ def extract_structure(
         if ct is None or not ct.text:
             continue
         title = ct.text.strip()
+        # Nur Kapitel, die mit Buchstaben-ID beginnen
         if not CHAPTER_RE.match(title):
             continue
         chap_id = title.split()[0]
@@ -129,11 +185,19 @@ def extract_structure(
             mod_id = m.group(1)
             mod_titel = raw[len(mod_id):].strip()
 
-            beschreibung = _text_from_paras(_find_subsection(mod, "Beschreibung") or mod)
-            zielsetzung = _text_from_paras(_find_subsection(mod, "Zielsetzung") or mod)
-            abgrenzung = _text_from_paras(_find_subsection(mod, "Abgrenzung und Modellierung") or mod)
+            # Haupttexte in Unterabschnitte gliedern oder gesamtes Element nehmen
+            beschreibung = _text_from_paras(
+                _find_subsection(mod, "Beschreibung") or mod
+            )
+            zielsetzung = _text_from_paras(
+                _find_subsection(mod, "Zielsetzung") or mod
+            )
+            abgrenzung = _text_from_paras(
+                _find_subsection(mod, "Abgrenzung und Modellierung") or mod
+            )
 
-            threats = []
+            # Gefährdungslage extrahieren
+            threats: List[Dict[str, str]] = []
             th_sec = _find_subsection(mod, "Gefährdungslage")
             if th_sec:
                 for tsec in th_sec.findall("db:section", NS):
@@ -145,7 +209,8 @@ def extract_structure(
                         "text": _text_from_paras(tsec)
                     })
 
-            requirements = []
+            # Anforderungen aus Unterabschnitt 'Anforderungen'
+            requirements: List[Dict[str, Any]] = []
             req_root = _find_subsection(mod, "Anforderungen")
             if req_root:
                 for r in req_root.findall(".//db:section", NS):
@@ -156,6 +221,7 @@ def extract_structure(
                     if not REQ_RE.match(full):
                         continue
                     rid = full.split()[0]
+                    # Extrahiere Schutzbedarfsanforderung (Basis/Standard/Erhöhter Schutzbedarf) und Rollen
                     lvl_m = re.search(r"\((B|S|H)\)", full)
                     katg = lvl_m.group(1) if lvl_m else "?"
                     roles_m = re.search(r"\[(.+?)\]", full)
@@ -199,6 +265,17 @@ def extract_structure(
 
 
 def modules_to_documents(bausteinkategorien: List[Dict[str, Any]]) -> List[Document]:
+    """
+    Wandelt Baustein-Daten in eine Liste von LangChain-Documents um.
+
+    Jeder Baustein, jede Gefahr und jede Anforderung wird in Chunks
+    von maximal 1000 Zeichen aufgeteilt (Overlap 200).
+
+    Args:
+        bausteinkategorien: Liste der Kategorien mit ihren Bausteinen.
+    Returns:
+        Liste von langchain.schema.Document-Objekten.
+    """
     docs: List[Document] = []
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
 
@@ -214,6 +291,7 @@ def modules_to_documents(bausteinkategorien: List[Dict[str, Any]]) -> List[Docum
                 "baustein_titel": b["baustein_titel"],
             }
 
+            # Haupttext
             full_text = "\n\n".join([
                 f"Beschreibung:\n{b['Beschreibung']}",
                 f"Zielsetzung:\n{b['Zielsetzung']}",
@@ -223,7 +301,7 @@ def modules_to_documents(bausteinkategorien: List[Dict[str, Any]]) -> List[Docum
                 meta = {**base_meta, "Art": "Baustein", "chunk_index": i}
                 docs.append(Document(page_content=chunk, metadata=meta))
 
-            # Gefahren-Chunks
+            # Gefahren
             for thr in b["threats"]:
                 thr_text = f"{thr['gefahren_id']}\n\n{thr['text']}"
                 for i, chunk in enumerate(splitter.split_text(thr_text)):
@@ -235,7 +313,7 @@ def modules_to_documents(bausteinkategorien: List[Dict[str, Any]]) -> List[Docum
                     }
                     docs.append(Document(page_content=chunk, metadata=meta))
 
-            # Anforderungs-Chunks
+            # Anforderungen
             for req in b["requirements"]:
                 for i, chunk in enumerate(splitter.split_text(req["text"])):
                     meta = {
@@ -258,7 +336,12 @@ def modules_to_documents(bausteinkategorien: List[Dict[str, Any]]) -> List[Docum
 
 
 def main():
-    parser = argparse.ArgumentParser("IT-Grundschutz XML → JSON oder VectorDB")
+    """
+    CLI-Einstiegspunkt:
+      - Modus 'json': exportiere JSON-Datei
+      - Modus 'vectordb': befülle Chroma-DB mit Embeddings
+    """
+    parser = argparse.ArgumentParser(description="IT-Grundschutz XML → JSON oder VectorDB")
     parser.add_argument("xml", help="Pfad zur XML-Datei")
     parser.add_argument("--mode", choices=["json", "vectordb"], default="json")
     parser.add_argument("--output", help="JSON-Datei (json) oder DB-Verzeichnis (vectordb)")
@@ -267,9 +350,11 @@ def main():
     xml_path = args.xml
     out = args.output or ("resources/requirements.json" if args.mode == "json" else "db")
 
+    # Excel-Mapping und Gefahren-Titel laden
     gefahr_map, cia_map = load_excel_mapping(EXCEL_MAP_FILE)
     gefahr_titel = load_threat_titles(xml_path)
 
+    # Struktur extrahieren
     bausteinkategorien = extract_structure(xml_path, gefahr_map, gefahr_titel, cia_map)
     bc = sum(len(k["bausteine"]) for k in bausteinkategorien)
     rc = sum(len(b["requirements"]) for k in bausteinkategorien for b in k["bausteine"])
