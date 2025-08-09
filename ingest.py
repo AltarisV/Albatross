@@ -14,7 +14,8 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
-load_dotenv()
+# Nur notwendig bei OpenAI-Embeddings
+# load_dotenv()
 
 REQ_RE = re.compile(r"^[A-Z]+(?:\.\d+)+\.A\d+\b")
 MODULE_RE = re.compile(r"^([A-Z]+(?:\.\d+)+)\s+")
