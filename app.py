@@ -27,6 +27,8 @@ try:
 except ImportError:
     AgGrid = None
 
+# Hier load_dotenv einfügen wenn OpenAI Embeddings verwendet werden sollen
+
 
 def _requirement_sort_key(rid: str):
     """

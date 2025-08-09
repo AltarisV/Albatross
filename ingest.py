@@ -29,6 +29,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
+# Hier load_dotenv einfügen wenn OpenAI Embeddings verwendet werden sollen
 
 # Regex für Requirement-IDs im Format "ABC.1.2.A3"
 REQ_RE = re.compile(r"^[A-Z]+(?:\.\d+)+\.A\d+\b")
