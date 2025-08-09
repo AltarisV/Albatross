@@ -1,11 +1,13 @@
-python-dotenv
-streamlit
-pandas
+python-dotenv~=1.1.0
+streamlit~=1.45.0
+pandas~=2.2.3
 streamlit-aggrid
-langchain
+langchain~=0.3.25
 langchain-community
 chromadb
 openai
 python-docx
 tiktoken
 xlsxwriter
+
+torch~=2.7.0
