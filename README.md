@@ -1,15 +1,5 @@
 A Proof of Concept for extracting IT-Grundschutz requirements from the **XML** edition of the Kompendium with `ingest.py`, loading them into ChromaDB (or dumping to JSON), and then querying/navigation via a Streamlit app in `app.py`.
 
-## Configuration
-
-1. Create a `.env` file with your [OpenAI API Key](https://openai.com/blog/openai-api) in the project root (only really needed it you want to store in the vector db):
-
-   ```env
-   OPENAI_API_KEY='your_openai_api_key_here'
-   ```
-
-2. Place your XML file in **`resources/grundschutz_2023.xml`** (or adjust the path in the commands below).
-
 ## Usage
 
 ### 1. Ingest Requirements from XML
@@ -40,14 +30,7 @@ python ingest.py resources/grundschutz_2023.xml \
   --output db
 ```
 
-After running, you’ll see something like:
-
-```
-📄 Extracted 2187 requirements from 'resources/grundschutz_2023.xml'.
-✅ Wrote 2187 requirements to JSON file 'requirements.json'
-```
-
-(or…)
+After running, you’ll see something like this:
 
 ```
 📄 Extracted 2187 requirements from 'resources/grundschutz_2023.xml'.
