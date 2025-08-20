@@ -24,21 +24,27 @@ Hinweise:
   - Falls eine Anforderung bereits in der Excel (KRT) ein CIA-Feld hat,
     wird dieses übernommen. Nur wenn es leer ist, werden die Gefährdungen
     herangezogen und per BSI-200-3-Mapping auf CIA abgebildet.
+  - Diese Version verwendet ausschließlich OpenAI-Embeddings. Setze OPENAI_API_KEY
+    (z. B. via .env + load_dotenv). Das Embedding-Modell ist per ENV
+    OPENAI_EMBEDDING_MODEL überschreibbar (Default: 'text-embedding-3-small').
 """
+
 import os
 import argparse
 import json
 import re
 import xml.etree.ElementTree as ET
 from typing import List, Dict, Any, Optional, Tuple
-import torch
 
 import pandas as pd
+from dotenv import load_dotenv
 from langchain.schema import Document
-
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings
+
+# .env laden (für OPENAI_API_KEY, OPENAI_EMBEDDING_MODEL, etc.)
+load_dotenv()
 
 # --------------------------------------------------------------------
 # Konfiguration / Konstanten
@@ -57,6 +63,9 @@ NS = {"db": "http://docbook.org/ns/docbook"}
 EXCEL_MAP_FILE = "resources/krt2023_Excel.xlsx"
 # Gefährdung→Schutzziel-Tabelle aus BSI-Standard 200-3
 BSI2023_THREAT2CIA_CSV = "resources/bsi2023_threats_to_cia.csv"
+
+# OpenAI-Embedding-Modell (per ENV überschreibbar)
+OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 
 
 # --------------------------------------------------------------------
@@ -499,6 +508,10 @@ def main() -> None:
     xml_path = args.xml
     out = args.output or ("resources/requirements.json" if args.mode == "json" else "db")
 
+    # Check OpenAI Key frühzeitig
+    if not os.getenv("OPENAI_API_KEY"):
+        raise EnvironmentError("OPENAI_API_KEY ist nicht gesetzt. Bitte .env anlegen oder Env-Var setzen.")
+
     # Excel-Mapping & Threat-Titel laden
     gefahr_map, cia_map = load_excel_mapping(EXCEL_MAP_FILE)
     gefahr_titel = load_threat_titles(xml_path)
@@ -517,12 +530,8 @@ def main() -> None:
             json.dump(bausteinkategorien, f, indent=2, ensure_ascii=False)
         print(f"✅ JSON: {bc} Bausteine, {rc} Anforderungen → {out}")
     else:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        embeddings = HuggingFaceEmbeddings(
-            model_name="BAAI/bge-m3",
-            model_kwargs={"device": device},
-            encode_kwargs={"normalize_embeddings": True}
-        )
+        # OpenAI-Embeddings (keine GPU/torch-Konfiguration nötig)
+        embeddings = OpenAIEmbeddings(model=OPENAI_EMBEDDING_MODEL)
         docs = modules_to_documents(bausteinkategorien)
         Chroma.from_documents(docs, embeddings, persist_directory=out)
         print(f"✅ Chroma: {len(docs)} Dokumente → {out}")

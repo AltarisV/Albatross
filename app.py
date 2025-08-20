@@ -5,29 +5,49 @@ Streamlit-Anwendung zur interaktiven Suche und Auswahl von IT-Grundschutz-Daten.
 
 Features:
   - Drilldown der Bausteine inkl. Filter nach Schutzzielen
-  - Semantische Suche über Vektor-Embedding-Modell
+  - Semantische Suche über Vektor-Embedding-Modell (OpenAI)
   - Auswahl und Download der ausgewählten Anforderungen als Excel
 
 Verwendung:
     streamlit run app.py
     python -m streamlit run app.py
+
+Wichtig:
+  - Dieser Branch verwendet ausschließlich OpenAI-Embeddings.
+  - Setze OPENAI_API_KEY (z. B. via .env + load_dotenv()).
+  - Die Chroma-DB muss mit demselben Embedding-Modell erstellt sein
+    (im OpenAI-Branch also ingest.py ebenfalls auf OpenAI umstellen und DB neu aufbauen).
 """
+
+import os
 import re
 from io import BytesIO
 
 import pandas as pd
 import streamlit as st
-import torch
+from dotenv import load_dotenv
 from langchain.embeddings.base import Embeddings
 from langchain_chroma import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
+
+# OpenAI-Embeddings (langchain-openai)
+try:
+    from langchain_openai import OpenAIEmbeddings  # pip install langchain-openai openai
+except ImportError as e:
+    raise ImportError(
+        "langchain-openai ist nicht installiert. "
+        "Bitte im OpenAI-Branch installieren: pip install langchain-openai openai python-dotenv"
+    ) from e
 
 try:
     from st_aggrid import AgGrid, GridOptionsBuilder
 except ImportError:
     AgGrid = None
 
-# Hier load_dotenv einfügen wenn OpenAI Embeddings verwendet werden sollen
+# .env laden (hier war dein Kommentarplatz)
+load_dotenv()
+
+# Optional via ENV überschreibbar
+OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 
 
 def _requirement_sort_key(rid: str):
@@ -55,13 +75,10 @@ def _module_sort_key(mid: str):
     """
     nums = re.findall(r'\d+', mid)
     if len(nums) >= 2:
-        # z.B. ["2","3"] → (2,3)
         return int(nums[0]), int(nums[1])
     elif len(nums) == 1:
-        # z.B. "APP.12" → (12, 0)
         return int(nums[0]), 0
     else:
-        # kein Zahlen­match → ans Ende sortieren
         return float('inf'), float('inf')
 
 
@@ -108,7 +125,6 @@ def load_db_entries(persist_dir: str, embeddings: Embeddings):
         else:  # Anforderung
             title = meta.get("Anforderung", meta.get("Anforderungsnummer", ""))
 
-        gef_h_ids = meta.get("zugeordnete_gefahren", [])
         gef_h_titel = meta.get("zugeordnete_gefahren_titel", [])
         gef_h_str = ", ".join(gef_h_titel) if isinstance(gef_h_titel, list) else gef_h_titel
 
@@ -241,33 +257,33 @@ def add_to_cart(meta, chunks):
 
 
 @st.cache_resource(show_spinner=False)
-def get_embeddings():
+def get_embeddings() -> Embeddings:
     """
-    Initialisiert und cached das HuggingFace-Embedding-Modell BAAI/bge-m3.
+    Initialisiert und cached das OpenAI-Embedding-Modell.
 
-    Returns:
-        Instanz von HuggingFaceEmbeddings.
+    Model:
+      - OPENAI_EMBEDDING_MODEL (ENV) oder default 'text-embedding-3-small'
+    Requires:
+      - OPENAI_API_KEY (ENV / .env)
     """
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    return HuggingFaceEmbeddings(
-        model_name="BAAI/bge-m3",
-        model_kwargs={"device": device},
-        encode_kwargs={"normalize_embeddings": True}
-    )
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        st.error("OPENAI_API_KEY ist nicht gesetzt. Bitte .env anlegen oder Env-Var setzen.")
+        st.stop()
+    # OpenAIEmbeddings liest den Key auch aus der Env; explizit ist aber klarer:
+    return OpenAIEmbeddings(model=OPENAI_EMBEDDING_MODEL, api_key=api_key)
 
 
 @st.cache_resource(show_spinner=False)
-def get_vectordb(_embeddings):
+def get_vectordb(_embeddings: Embeddings):
     """
     Lädt und cached die lokale Chroma-Vektor-Datenbank.
 
-    Args:
-        _embeddings: Embedding-Funktion für die Datenbank.
-    Returns:
-        Chroma-Instanz.
+    Hinweis:
+        Die DB muss mit demselben Embedding-Modell erstellt worden sein.
     """
     return Chroma(
-        persist_directory='db',
+        persist_directory='db',   # Im OpenAI-Branch kannst du dies bei Bedarf auf 'db_openai' ändern.
         embedding_function=_embeddings
     )
 
@@ -277,17 +293,16 @@ def main():
     Startet die Streamlit-App, richtet Layout und Navigation ein,
     lädt Modell und Datenbank und steuert Seitenlogik.
     """
-    st.set_page_config(page_title='Kompendium Finder',
-                       layout='wide')
+    st.set_page_config(page_title='Kompendium Finder (OpenAI)', layout='wide')
 
     st.sidebar.markdown("### Status")
     status = st.sidebar.empty()
 
     if 'model_loaded' not in st.session_state:
-        status.info("📦 Lade Embedding-Modell…")
+        status.info("📦 Lade OpenAI-Embedding-Modell…")
         embeddings = get_embeddings()
         _ = embeddings.embed_query("initialisierung")
-        status.success("✅ Modell bereit")
+        status.success(f"✅ Modell bereit ({OPENAI_EMBEDDING_MODEL})")
         status.info("📡 Lade Vektor-Datenbank…")
         vectordb = get_vectordb(embeddings)
         status.success("✅ Alles bereit")
@@ -323,61 +338,9 @@ def main():
         st.sidebar.write("_Keine Anforderungen ausgewählt_")
 
     page = st.sidebar.radio('Navigation', [
-        # 'Datenbank Explorer',
         'Drilldown der Bausteine',
         'Semantische Suche'
     ])
-
-    # # ─── Datenbank Explorer ───
-    # if page == 'Datenbank Explorer':
-    #     st.header('Datenbank Explorer')
-    #     st.markdown(f"**Gesamt:** {len(df)} Dokumente in der Vektor-DB")
-    #     with st.sidebar:
-    #         st.subheader('Filter')
-    #         art_sel = st.multiselect('Dokument-Art', sorted(df['Art'].unique()), sorted(df['Art'].unique()))
-    #         kat_sel = st.multiselect('Bausteinkategorie', sorted(df['Bausteinkategorie'].unique()),
-    #                                  sorted(df['Bausteinkategorie'].unique()))
-    #         b_sel = st.multiselect('Baustein', sorted(df['Baustein'].unique()), sorted(df['Baustein'].unique()))
-    #         katg_sel = st.multiselect('Anforderungskategorie', sorted(df['Anforderungskategorie'].unique()),
-    #                                   sorted(df['Anforderungskategorie'].unique()))
-    #         rollen_sel = st.multiselect('Rollen', sorted({r for row in df['Rollen'] for r in row.split(', ') if r}),
-    #                                     sorted({r for row in df['Rollen'] for r in row.split(', ') if r}))
-    #         gef_sel = st.multiselect(
-    #             'Zugeordnete Gefahren',
-    #             options=sorted(df['Zugeordnete Gefahren'].unique()),
-    #             default=[]
-    #         )
-    #         sort_col = st.selectbox('Sortiere nach',
-    #                                 ['Bausteinkategorie', 'Baustein', 'Art', 'Anforderungskategorie', 'Titel'], index=0)
-    #         ascending = st.checkbox('Aufsteigend', True)
-    #
-    #     mask = (
-    #             df['Art'].isin(art_sel) &
-    #             df['Bausteinkategorie'].isin(kat_sel) &
-    #             df['Baustein'].isin(b_sel) &
-    #             df['Anforderungskategorie'].isin(katg_sel) &
-    #             ((df['Art'] != 'Anforderung') |
-    #              df['Rollen'].apply(lambda rs: any(r in rs for r in rollen_sel))) &
-    #             df['Zugeordnete Gefahren'].apply(lambda s: all(g in s for g in gef_sel))
-    #     )
-    #
-    #     df_filt = df[mask].sort_values(by=sort_col, ascending=ascending).reset_index(drop=True)
-    #
-    #     st.subheader('Gefilterte Dokumente')
-    #
-    #     if AgGrid:
-    #         gb = GridOptionsBuilder.from_dataframe(df_filt)
-    #         gb.configure_default_column(editable=False, wrapText=True, autoHeight=True)
-    #         gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=15)
-    #         grid = AgGrid(df_filt, gridOptions=gb.build(), height=600, fit_columns_on_grid_load=True)
-    #         sel = grid.get('selected_rows') or []
-    #         if sel:
-    #             idx = sel[0]['_selectedRowNodeInfo']['nodeRowIndex']
-    #             st.markdown('---')
-    #             st.subheader('Detail')
-    #             st.write(docs[idx])
-    #     else:
-    #         st.dataframe(df_filt, height=600)
 
     if page == 'Drilldown der Bausteine':
         st.header('Drilldown der Bausteine')
@@ -414,8 +377,7 @@ def main():
                     st.markdown("**Anforderungen:**")
                     for rid, req in sorted(info['anforderungen'].items(), key=lambda x: _requirement_sort_key(x[0])):
                         meta = req['meta']
-                        meta = req['meta']
-                        # Falls Schutzziel-Filter aktiv und die Anforderung keins der gewählten Ziele hat, überspringen
+                        # Schutzziel-Filter
                         if cia_sel:
                             if ("Vertraulichkeit" in cia_sel and not meta.get("Vertraulichkeit")) \
                                     or ("Integrität" in cia_sel and not meta.get("Integrität")) \
